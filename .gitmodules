@@ -1,0 +1,6 @@
+[submodule "test/flac-test-files"]
+	path = test/flac-test-files
+	url = https://github.com/ietf-wg-cellar/flac-test-files.git
+[submodule "lib/micro-ogg-demuxer"]
+	path = lib/micro-ogg-demuxer
+	url = https://github.com/esphome-libs/micro-ogg-demuxer

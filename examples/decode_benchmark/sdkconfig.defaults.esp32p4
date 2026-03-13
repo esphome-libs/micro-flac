@@ -1,0 +1,9 @@
+# ESP32-P4 specific settings
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# CPU Frequency (360 MHz for pre-rev.300 eval board)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+
+# Hex (16-line) PSRAM mode - only mode available on P4
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y

@@ -1,0 +1,34 @@
+{
+  "name": "micro-flac",
+  "version": "0.1.0",
+  "description": "FLAC audio decoder optimized for ESP32 with Xtensa assembly optimizations",
+  "keywords": ["flac", "audio", "decoder", "esp32", "embedded"],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/esphome-libs/micro-flac.git"
+  },
+  "authors": [
+    {
+      "name": "Kevin Ahrendt",
+      "email": "kevin.ahrendt@openhomefoundation.org",
+      "maintainer": true
+    }
+  ],
+  "frameworks": ["espidf"],
+  "platforms": ["espressif32"],
+  "export": {
+    "include": [
+      "src/*",
+      "include/*",
+      "lib/*",
+      "cmake/*",
+      "CMakeLists.txt",
+      "Kconfig",
+      "LICENSE",
+      "README.md",
+      "library.json",
+      "idf_component.yml"
+    ]
+  }
+}

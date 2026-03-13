@@ -1,0 +1,140 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pre-commit:
+    name: Pre-commit checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - uses: esphome/pre-commit-action@43cd1109c09c544d97196f7730ee5b2e0cc6d81e # v3.0.1 fork with pinned actions/cache
+
+  lint:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Install clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+
+      - name: Run clang-tidy
+        run: ./script/clang-tidy.sh
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Configure CMake
+        run: cmake -B build -DENABLE_WERROR=ON host_examples/flac_to_wav
+
+      - name: Build
+        run: cmake --build build
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Get test files submodule commit
+        id: test-files-ref
+        run: echo "sha=$(git rev-parse HEAD:test/flac-test-files)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache test files
+        id: cache-test-files
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: test/flac-test-files
+          key: flac-test-files-${{ steps.test-files-ref.outputs.sha }}
+
+      - name: Clone test files
+        if: steps.cache-test-files.outputs.cache-hit != 'true'
+        run: git submodule update --init --depth 1 test/flac-test-files
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Configure CMake with sanitizers
+        run: cmake -B build -DENABLE_SANITIZERS=ON -DENABLE_WERROR=ON host_examples/flac_to_wav
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run tests
+        run: python3 host_examples/flac_to_wav/test_flac_decoder.py --mode all
+
+  platformio:
+    name: PlatformIO Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - example: decode_benchmark
+            environments: esp32,esp32s3
+          - example: test_lpc_asm
+            environments: esp32,esp32s3
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            ~/.platformio
+            examples/${{ matrix.example }}/.pio
+          key: pio-${{ matrix.example }}-${{ hashFiles(format('examples/{0}/platformio.ini', matrix.example)) }}
+          restore-keys: |
+            pio-${{ matrix.example }}-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ${{ matrix.example }}
+        run: |
+          IFS=',' read -ra ENVS <<< "${{ matrix.environments }}"
+          for env in "${ENVS[@]}"; do
+            echo "Building environment: $env"
+            pio run -d examples/${{ matrix.example }} -e "$env"
+          done

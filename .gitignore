@@ -1,0 +1,109 @@
+# Claude Code
+.claude/
+
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.la
+*.lo
+.libs/
+.deps/
+
+# PlatformIO
+.pio/
+
+# ESP-IDF specific
+sdkconfig.*
+!sdkconfig.defaults*
+sdkconfig.old
+*.bin
+*.elf
+*.map
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+compile_commands.json
+
+# IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cproject
+.project
+.settings/
+
+# OS specific
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+venv/
+env/
+
+# Logs
+*.log
+log/
+
+# Test outputs
+*.wav
+*.pcm
+*.flac
+test_output/
+test_results/
+
+# Debug symbols
+*.dSYM/
+*.pdb
+
+# Documentation
+doc/html/
+doc/latex/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+.cache/
+
+# Component registry
+dependencies.lock
+managed_components/
+
+# Example build files
+examples/*/build/
+examples/*/sdkconfig
+examples/*/sdkconfig.*
+
+# Host example build files
+host_examples/*/build/
+
+# Benchmark/test data
+*.tar.gz
+*.tar
+*.zip
+test_data/
+benchmark_results/
+
+# Core dumps
+core
+core.*
+vgcore.*
+
+# Coverage
+*.gcda
+*.gcno
+*.gcov
+coverage/
+htmlcov/

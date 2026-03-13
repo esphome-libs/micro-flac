@@ -1,0 +1,26 @@
+## IDF Component Manager Manifest File
+name: "micro-flac"
+dependencies:
+  idf: ">=4.4"
+description: "FLAC audio decoder optimized for ESP32 with Xtensa assembly optimizations"
+license: "Apache-2.0"
+maintainers:
+  - Kevin Ahrendt <kevin.ahrendt@openhomefoundation.org>
+version: "0.1.0"
+url: https://github.com/esphome-libs/micro-flac
+repository: https://github.com/esphome-libs/micro-flac.git
+files:
+  exclude:
+    - ".claude/**"
+    - ".github/**"
+    - ".clang-*"
+    - ".clangd"
+    - ".markdownlint.yaml"
+    - ".pre-commit-config.yaml"
+    - "host_examples/**"
+    - "examples/**"
+    - "test/**"
+    - "script/**"
+    - "python/**"
+    - "CLAUDE.md"
+    - "*.flac"

@@ -1,0 +1,67 @@
+menu "microFLAC Decoder"
+
+    choice MICRO_FLAC_MEMORY_PREFERENCE
+        prompt "Memory allocation preference"
+        default MICRO_FLAC_PREFER_PSRAM if SPIRAM
+        default MICRO_FLAC_INTERNAL_ONLY
+        help
+            Choose memory allocation preference for FLAC decoder buffers.
+
+            The decoder allocates a working buffer based on max_block_size
+            from STREAMINFO (typically 16-64KB for stereo). This setting
+            controls where that buffer is allocated.
+
+        config MICRO_FLAC_PREFER_PSRAM
+            bool "Prefer PSRAM, fall back to internal RAM"
+            depends on SPIRAM
+            help
+                Try to allocate from PSRAM first. If unavailable, fall back
+                to internal RAM. Recommended for most use cases.
+
+        config MICRO_FLAC_PREFER_INTERNAL
+            bool "Prefer internal RAM, fall back to PSRAM"
+            depends on SPIRAM
+            help
+                Try to allocate from internal RAM first. Better performance
+                but uses precious internal RAM.
+
+        config MICRO_FLAC_PSRAM_ONLY
+            bool "PSRAM only (fail if unavailable)"
+            depends on SPIRAM
+            help
+                Only allocate from PSRAM. Allocation will fail if PSRAM is
+                not available. Use when internal RAM must be reserved for
+                other components.
+
+        config MICRO_FLAC_INTERNAL_ONLY
+            bool "Internal RAM only"
+            help
+                Only allocate from internal RAM. Ignores PSRAM even if
+                available. Best performance but highest internal RAM usage.
+
+    endchoice
+
+    config MICRO_FLAC_ENABLE_XTENSA_ASM
+        bool "Enable Xtensa assembly optimizations"
+        default y if IDF_TARGET_ESP32 || IDF_TARGET_ESP32S3
+        default n
+        help
+            Enable Xtensa assembly optimizations for LPC prediction
+            restoration.
+
+            Uses MULL/MULSH and hardware loop instructions on ESP32 and
+            ESP32-S3 for significantly faster decoding. Only available
+            on Xtensa-based targets.
+
+    config MICRO_FLAC_ENABLE_OGG
+        bool "Enable Ogg FLAC container support"
+        default y
+        help
+            Enable support for Ogg FLAC container format (.oga/.ogg files).
+
+            When disabled, only native FLAC files are supported, saving
+            approximately 3-5 KB of flash and eliminating the OggDemuxer
+            heap allocation. Disable this if you only need native FLAC
+            decoding.
+
+endmenu
