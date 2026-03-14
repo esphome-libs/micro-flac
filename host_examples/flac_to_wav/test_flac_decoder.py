@@ -797,6 +797,12 @@ def main():
         default=None,
         help="Path to build directory containing flac_to_wav binary",
     )
+    parser.add_argument(
+        "--categories",
+        type=str,
+        default=None,
+        help="Comma-separated test categories (default: subset,uncommon,faulty)",
+    )
     args = parser.parse_args()
 
     global FLAC_TO_WAV
@@ -804,6 +810,11 @@ def main():
         FLAC_TO_WAV = Path(args.build_dir).resolve() / "flac_to_wav"
     else:
         FLAC_TO_WAV = DEFAULT_FLAC_TO_WAV
+
+    if args.categories:
+        categories = [s.strip() for s in args.categories.split(",")]
+    else:
+        categories = TEST_CATEGORIES
 
     run_flac = args.format in ("all", "flac")
     run_ogg = args.format in ("all", "ogg")
@@ -854,7 +865,7 @@ def main():
         if run_normal:
             # Run tests for each category
             all_results = []
-            for category in TEST_CATEGORIES:
+            for category in categories:
                 results = test_category(category)
                 all_results.extend(results)
 
@@ -902,7 +913,7 @@ def main():
         print("\n" + "=" * 40)
         print("32-BIT OUTPUT TESTS")
         print("=" * 40)
-        for category in TEST_CATEGORIES:
+        for category in categories:
             if not test_32bit_output(category):
                 any_failed = True
         if any_failed:
