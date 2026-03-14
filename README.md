@@ -4,6 +4,8 @@
 
 A FLAC (Free Lossless Audio Codec) decoder optimized for ESP32 embedded devices. Supports both native FLAC and Ogg FLAC containers with automatic format detection. Designed as an ESP-IDF component with PSRAM support and Xtensa assembly optimizations for ESP32/ESP32-S3.
 
+[![A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/ohf-project.png)](https://www.openhomefoundation.org/)
+
 ## Features
 
 - **Native FLAC and Ogg FLAC**: Automatic container detection from first 4 bytes
