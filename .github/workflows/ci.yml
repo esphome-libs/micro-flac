@@ -94,7 +94,7 @@ jobs:
         run: cmake --build build
 
       - name: Run tests
-        run: python3 host_examples/flac_to_wav/test_flac_decoder.py --mode all
+        run: python3 host_examples/flac_to_wav/test_flac_decoder.py --mode all --build-dir build
 
   platformio:
     name: PlatformIO Build

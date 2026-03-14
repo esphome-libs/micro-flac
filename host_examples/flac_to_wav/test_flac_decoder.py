@@ -14,7 +14,7 @@ from datetime import datetime
 
 # Configuration
 SCRIPT_DIR = Path(__file__).resolve().parent
-FLAC_TO_WAV = SCRIPT_DIR / "build" / "flac_to_wav"
+DEFAULT_FLAC_TO_WAV = SCRIPT_DIR / "build" / "flac_to_wav"
 TEST_FILES_DIR = SCRIPT_DIR / ".." / ".." / "test" / "flac-test-files"
 RESULTS_DIR = SCRIPT_DIR / "test_results"
 OGG_FLAC_DIR = RESULTS_DIR / "ogg_flac_files"
@@ -791,7 +791,19 @@ def main():
         default=None,
         help="Comma-separated chunk sizes for streaming tests (default: 1,37,256,1024)",
     )
+    parser.add_argument(
+        "--build-dir",
+        type=str,
+        default=None,
+        help="Path to build directory containing flac_to_wav binary",
+    )
     args = parser.parse_args()
+
+    global FLAC_TO_WAV
+    if args.build_dir:
+        FLAC_TO_WAV = Path(args.build_dir).resolve() / "flac_to_wav"
+    else:
+        FLAC_TO_WAV = DEFAULT_FLAC_TO_WAV
 
     run_flac = args.format in ("all", "flac")
     run_ogg = args.format in ("all", "ogg")
