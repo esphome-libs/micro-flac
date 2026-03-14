@@ -38,7 +38,7 @@ uint8_t compute_frame_header_length(const uint8_t* header) {
         utf8_len = 0;
         while (mask & 0x80) {
             utf8_len++;
-            mask <<= 1;
+            mask = static_cast<uint8_t>(mask << 1);
         }
         if (utf8_len > 7) {
             utf8_len = 7;  // FLAC spec max is 7 bytes
