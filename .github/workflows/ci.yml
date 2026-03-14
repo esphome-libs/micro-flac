@@ -51,21 +51,52 @@ jobs:
         run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
 
       - name: Configure CMake
-        run: cmake -B build -DENABLE_WERROR=ON host_examples/flac_to_wav
+        run: cmake -B build -DENABLE_SANITIZERS=ON -DENABLE_WERROR=ON host_examples/flac_to_wav
 
       - name: Build
         run: cmake --build build
 
+      - name: Upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flac_to_wav
+          path: build/flac_to_wav
+
   test:
-    name: Test
+    name: "Test: ${{ matrix.name }}"
     runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: FLAC decode
+            args: --mode normal --format flac
+          - name: FLAC streaming (1 byte)
+            args: --mode streaming --format flac --chunk-sizes 1
+          - name: FLAC streaming (37 bytes)
+            args: --mode streaming --format flac --chunk-sizes 37
+          - name: Ogg FLAC decode
+            args: --mode normal --format ogg
+          - name: Ogg FLAC streaming (3 bytes)
+            args: --mode streaming --format ogg --chunk-sizes 3
+          - name: Ogg FLAC streaming (37 bytes)
+            args: --mode streaming --format ogg --chunk-sizes 37
+          - name: 32-bit output
+            args: --mode 32bit --format flac
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: false
 
-      - name: Initialize library submodules
-        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+      - name: Download build artifact
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.2
+        with:
+          name: flac_to_wav
+          path: build
+
+      - name: Make binary executable
+        run: chmod +x build/flac_to_wav
 
       - name: Get test files submodule commit
         id: test-files-ref
@@ -82,19 +113,13 @@ jobs:
         if: steps.cache-test-files.outputs.cache-hit != 'true'
         run: git submodule update --init --depth 1 test/flac-test-files
 
-      - name: Install ffmpeg
+      - name: Install ffmpeg and flac
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg flac
 
-      - name: Configure CMake with sanitizers
-        run: cmake -B build -DENABLE_SANITIZERS=ON -DENABLE_WERROR=ON host_examples/flac_to_wav
-
-      - name: Build
-        run: cmake --build build
-
       - name: Run tests
-        run: python3 host_examples/flac_to_wav/test_flac_decoder.py --mode all --categories subset --chunk-sizes 1,37 --build-dir build
+        run: python3 host_examples/flac_to_wav/test_flac_decoder.py --categories subset --build-dir build ${{ matrix.args }}
 
   platformio:
     name: PlatformIO Build
