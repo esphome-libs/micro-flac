@@ -13,9 +13,10 @@ from pathlib import Path
 from datetime import datetime
 
 # Configuration
-FLAC_TO_WAV = Path("./build/flac_to_wav")
-TEST_FILES_DIR = Path("../../test/flac-test-files")
-RESULTS_DIR = Path("test_results")
+SCRIPT_DIR = Path(__file__).resolve().parent
+FLAC_TO_WAV = SCRIPT_DIR / "build" / "flac_to_wav"
+TEST_FILES_DIR = SCRIPT_DIR / ".." / ".." / "test" / "flac-test-files"
+RESULTS_DIR = SCRIPT_DIR / "test_results"
 OGG_FLAC_DIR = RESULTS_DIR / "ogg_flac_files"
 DEFAULT_CHUNK_SIZES = [1, 37, 256, 1024]
 
