@@ -98,9 +98,9 @@ jobs:
       - name: Make binary executable
         run: chmod +x build/flac_to_wav
 
-      - name: Get test files submodule commit
+      - name: Get test files latest commit
         id: test-files-ref
-        run: echo "sha=$(git rev-parse HEAD:test/flac-test-files)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$(git ls-remote https://github.com/ietf-wg-cellar/flac-test-files.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Cache test files
         id: cache-test-files
@@ -111,7 +111,7 @@ jobs:
 
       - name: Clone test files
         if: steps.cache-test-files.outputs.cache-hit != 'true'
-        run: git submodule update --init --depth 1 test/flac-test-files
+        run: git clone --depth 1 https://github.com/ietf-wg-cellar/flac-test-files.git test/flac-test-files
 
       - name: Install ffmpeg and flac
         run: |

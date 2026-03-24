@@ -840,8 +840,8 @@ def main():
 
     if not TEST_FILES_DIR.exists():
         print(f"Error: Test files not found at {TEST_FILES_DIR}")
-        print("Please ensure the flac-test-files submodule is initialized:")
-        print("  git submodule update --init")
+        print("Please clone the test files:")
+        print("  git clone --depth 1 https://github.com/ietf-wg-cellar/flac-test-files.git test/flac-test-files")
         return 1
 
     # Check ffmpeg

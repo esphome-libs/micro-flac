@@ -18,11 +18,11 @@ The test suite validates the FLAC decoder against the official FLAC test files. 
 
 ## Setting Up Test Files
 
-The test files are included as a git submodule at `test/flac-test-files/`. Initialize them if you haven't already:
+The test files are not included as a submodule to keep the library lightweight for consumers. Clone them manually:
 
 ```bash
 # From the microFLAC root directory
-git submodule update --init
+git clone --depth 1 https://github.com/ietf-wg-cellar/flac-test-files.git test/flac-test-files
 ```
 
 Expected directory structure:
