@@ -1,6 +1,6 @@
 {
   "name": "micro-flac",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "FLAC audio decoder optimized for ESP32 with Xtensa assembly optimizations",
   "keywords": ["flac", "audio", "decoder", "esp32", "embedded"],
   "license": "Apache-2.0",
