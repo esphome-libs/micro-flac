@@ -55,8 +55,9 @@ void apply_channel_decorrelation(int32_t* block_samples, const SideT* side_chann
         for (; i < block_size; i++) {
             block_samples[i] = wadd32(side_channel[i], block_samples[block_size + i]);
         }
-    } else if (channel_assignment == CHANNEL_MID_SIDE) {
-        // MID_SIDE: Left = Mid + Side/2, Right = Mid - Side/2
+    } else {
+        // MID_SIDE (caller guarantees channel_assignment is 8, 9, or 10).
+        // Left = Mid + Side/2, Right = Mid - Side/2
         // Arithmetic right shift for side>>1 is required by the FLAC spec.
         // With SideT=int64_t, the shift operates on the full 33-bit value.
         // Process 4 samples at a time
