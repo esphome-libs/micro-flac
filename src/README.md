@@ -14,7 +14,8 @@ Based on [Nayuki's Simple FLAC Implementation](https://www.nayuki.io/res/simple-
 
 ### Core Decoder
 
-- `flac_decoder.cpp` - Main decoder: state machine, container detection, header/metadata parsing, subframe decoding, residual decoding, bitstream reading
+- `flac_decoder.cpp` - Main decoder: state machine, container detection, header/metadata parsing, subframe decoding, residual decoding
+- `bit_reader.h` - Header-only bit-stream primitives: `BitReaderLocal` state struct plus `refill_bit_buffer_local()`, `read_uint_local()`, `read_rice_sint_local<Resuming>()`. Header-only so `FLAC_ALWAYS_INLINE` is honored at every call site
 - `frame_header.h` / `frame_header.cpp` - Frame header parsing: `compute_frame_header_length()`, `parse_frame_header()` (sync validation, field extraction, CRC-8 check, STREAMINFO validation)
 - `decorrelation.h` / `decorrelation.cpp` - Stereo channel decorrelation: `apply_channel_decorrelation()` for LEFT_SIDE, RIGHT_SIDE, and MID_SIDE joint stereo modes
 
@@ -125,7 +126,9 @@ After all subframes are decoded, channel decorrelation is applied via `apply_cha
 
 ### Bitstream Reading
 
-The decoder uses a platform-sized bit buffer: 64-bit on host/64-bit platforms (refilled 8 bytes at a time) and 32-bit on ESP32/32-bit platforms (refilled 4 bytes at a time). This avoids unnecessary 64-bit arithmetic on embedded targets while reducing refill frequency on desktop. Read functions are inlined.
+The bit-stream primitives live in `bit_reader.h` as header-only `FLAC_ALWAYS_INLINE` functions operating on a `BitReaderLocal` stack struct. Hoisting bit-reader state into a local struct lets the compiler keep it in registers across hot loops, avoiding aliasing-induced spills through the decoder's member fields.
+
+The decoder uses a platform-sized bit buffer: 64-bit on host/64-bit platforms (refilled 8 bytes at a time) and 32-bit on ESP32/32-bit platforms (refilled 4 bytes at a time). This avoids unnecessary 64-bit arithmetic on embedded targets while reducing refill frequency on desktop.
 
 ### LPC Accumulator Type Selection
 
