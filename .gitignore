@@ -88,6 +88,7 @@ examples/*/sdkconfig.*
 
 # Host example build files
 host_examples/*/build/
+host_examples/*/build-*/
 
 # Benchmark/test data
 *.tar.gz
@@ -107,3 +108,6 @@ vgcore.*
 *.gcov
 coverage/
 htmlcov/
+
+# Fuzzing
+corpus/
