@@ -71,12 +71,8 @@ uint8_t compute_frame_header_length(const uint8_t* header) {
 FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
                                      const FLACStreamInfo& stream_info, bool crc_check,
                                      FrameHeaderInfo& info) {
-    // Bytes 0-1: sync code (already validated by decode_frame_header_phase)
-
-    // Reserved bit check
-    if (header[1] & 0x02) {
-        return FLAC_DECODER_ERROR_BAD_HEADER;
-    }
+    // Bytes 0-1: sync code + reserved bit (already validated by
+    // decode_frame_header_phase via the 0xFE mask, which forces header[1] bit 1 = 0)
 
     // Byte 2: block_size_code (upper nibble) + sample_rate_code (lower nibble)
     if (header[2] == 0xFF) {
