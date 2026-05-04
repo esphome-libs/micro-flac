@@ -250,28 +250,48 @@ uint8_t calculate_crc8(const uint8_t* data, size_t len) {
 }
 
 FLAC_OPTIMIZE_O3
-uint16_t update_crc16(uint16_t crc, const uint8_t* data, size_t len) {
+uint16_t update_crc16(uint16_t crc_in, const uint8_t* data, size_t len) {
     const uint8_t* end = data + len;
+    // Hold CRC in a 32-bit local so GCC doesn't insert a per-iteration
+    // `extui crc, crc, 0, 16` to honor uint16_t semantics. We only read bits
+    // [15:8] via a bit-field extract and XOR-in a 16-bit table value, so the
+    // upper bits are harmless until we narrow on return.
+    uint32_t crc = crc_in;
+
+    const uint8_t* end8 = data + (len & ~static_cast<size_t>(7));  // Round down to multiple of 8
 
 #if UINTPTR_MAX != 0xFFFFFFFF
     // On 64-bit hosts, process 8 bytes at a time using slicing-by-8
-    const uint8_t* end8 = data + (len & ~7U);  // Round down to multiple of 8
-
     while (data < end8) {
-        crc = static_cast<uint16_t>(
-            CRC16_TABLE_7[(crc >> 8) ^ data[0]] ^ CRC16_TABLE_6[(crc & 0xFF) ^ data[1]] ^
-            CRC16_TABLE_5[data[2]] ^ CRC16_TABLE_4[data[3]] ^ CRC16_TABLE_3[data[4]] ^
-            CRC16_TABLE_2[data[5]] ^ CRC16_TABLE_1[data[6]] ^ CRC16_TABLE_0[data[7]]);
+        crc = CRC16_TABLE_7[((crc >> 8) & 0xFF) ^ data[0]] ^ CRC16_TABLE_6[(crc & 0xFF) ^ data[1]] ^
+              CRC16_TABLE_5[data[2]] ^ CRC16_TABLE_4[data[3]] ^ CRC16_TABLE_3[data[4]] ^
+              CRC16_TABLE_2[data[5]] ^ CRC16_TABLE_1[data[6]] ^ CRC16_TABLE_0[data[7]];
+        data += 8;
+    }
+#else
+    // On 32-bit hosts, process 8 bytes per iteration using only TABLE_0.
+    // Amortizes the pointer advance and loop overhead across 8 bytes
+    // (7 + 1/8 = 7.125 insts/byte vs 8 for byte-at-a-time). Uses only
+    // TABLE_0 so no extra cache/flash pressure from additional tables.
+    while (data < end8) {
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ data[0]];
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ data[1]];
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ data[2]];
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ data[3]];
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ data[4]];
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ data[5]];
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ data[6]];
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ data[7]];
         data += 8;
     }
 #endif  // UINTPTR_MAX != 0xFFFFFFFF
 
-    // Byte-at-a-time (handles remaining bytes on 64-bit, all bytes on 32-bit)
+    // Byte-at-a-time (handles trailing bytes 0..7)
     while (data < end) {
-        crc = static_cast<uint16_t>((crc << 8) ^ CRC16_TABLE_0[(crc >> 8) ^ *data++]);
+        crc = (crc << 8) ^ CRC16_TABLE_0[((crc >> 8) & 0xFF) ^ *data++];
     }
 
-    return crc;
+    return static_cast<uint16_t>(crc);
 }
 
 }  // namespace micro_flac

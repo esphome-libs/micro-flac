@@ -15,6 +15,7 @@
 #include "micro_flac/flac_decoder.h"
 
 #include "alloc.h"
+#include "bit_reader.h"
 #include "compiler.h"
 #include "crc.h"
 #include "decorrelation.h"
@@ -55,14 +56,8 @@ static constexpr const int32_t* FIXED_COEFFICIENTS[] = {nullptr, FIXED_COEFFICIE
                                                         FIXED_COEFFICIENTS_2, FIXED_COEFFICIENTS_3,
                                                         FIXED_COEFFICIENTS_4};
 
-// Generate a bitmask with num_bits set to 1 (e.g., num_bits=3 -> 0b111 = 7)
-// This replaces the UINT_MASK lookup table with bit manipulation for better performance
-static FLAC_ALWAYS_INLINE uint32_t uint_mask(uint32_t num_bits) {
-    return (num_bits >= 32) ? UINT32_MAX : ((1U << num_bits) - 1);
-}
-
-// Mask for bit buffer width (used to mask shift amounts)
-static constexpr uint32_t BIT_BUFFER_SHIFT_MASK = BIT_BUFFER_BITS - 1;
+// The bit-reader primitives (BitReaderLocal, refill_bit_buffer_local,
+// read_uint_local, read_rice_sint_local) live in bit_reader.h.
 
 // ============================================================================
 // FLACMetadataBlock Lifecycle
@@ -769,7 +764,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame(const uint8_t* buffer, size
     return FLAC_DECODER_ERROR_INTERNAL;
 }
 
-FLAC_HOT void FLACDecoder::reset_frame_state() {
+void FLACDecoder::reset_frame_state() {
     this->frame_ = FrameState{};
     this->subframe_ = SubframeState{};
     this->residual_ = ResidualState{};
@@ -1323,39 +1318,12 @@ FLAC_OPTIMIZE_O3 FLACDecoderResult FLACDecoder::decode_residuals(OutputT* sub_fr
                     }
                     this->residual_.sample_idx = sample_idx_e;
                 } else {
-                    // Residuals are always decoded as int32_t even on the int64_t (wide-side)
-                    // path. Per RFC 9639 §9.2.7.3, Rice-coded residuals must fit in a signed
-                    // 32-bit two's complement integer (excluding INT32_MIN), so int32_t is
-                    // sufficient regardless of the output sample type.
-
-                    // Hoist struct fields into locals for the hot loop.
-                    // This lets the compiler keep them in registers instead
-                    // of reloading from memory on every iteration.
-                    uint32_t sample_idx = this->residual_.sample_idx;
-                    const uint32_t partition_count = this->residual_.partition_count;
                     const uint8_t rice_param = static_cast<uint8_t>(this->residual_.param);
-
-                    // If resuming mid-rice-read, finish that one sample first
-                    if (this->rice_.pending) {
-                        int32_t val = this->read_rice_sint<true>(rice_param);
-                        if (FLAC_UNLIKELY(this->out_of_data_)) {
-                            this->residual_.sample_idx = sample_idx;
-                            return FLAC_DECODER_NEED_MORE_DATA;
-                        }
-                        out_ptr[sample_idx] = val;
-                        sample_idx++;
-                        this->rice_.pending = false;
+                    FLACDecoderResult ret = this->decode_rice_partition<OutputT>(
+                        out_ptr, rice_param, this->residual_.partition_count);
+                    if (ret != FLAC_DECODER_SUCCESS) {
+                        return ret;
                     }
-                    for (; sample_idx < partition_count; sample_idx++) {
-                        int32_t val = this->read_rice_sint<false>(rice_param);
-                        if (FLAC_UNLIKELY(this->out_of_data_)) {
-                            this->residual_.sample_idx = sample_idx;
-                            this->rice_.pending = true;
-                            return FLAC_DECODER_NEED_MORE_DATA;
-                        }
-                        out_ptr[sample_idx] = val;
-                    }
-                    this->residual_.sample_idx = sample_idx;
                 }
 
                 this->residual_.out_ptr_offset += this->residual_.partition_count;
@@ -1378,6 +1346,100 @@ FLAC_OPTIMIZE_O3 FLACDecoderResult FLACDecoder::decode_residuals(OutputT* sub_fr
 
 template FLACDecoderResult FLACDecoder::decode_residuals<int32_t>(int32_t*, uint32_t, uint32_t);
 template FLACDecoderResult FLACDecoder::decode_residuals<int64_t>(int64_t*, uint32_t, uint32_t);
+
+// Non-inline so the hot Rice sample loop gets a fresh register file. The
+// surrounding subframe state machine holds many live values; isolating this
+// loop in its own function lets the compiler allocate registers just for
+// bit-reader state + partition locals.
+template <typename OutputT>
+FLAC_HOT FLAC_NOINLINE FLACDecoderResult
+FLACDecoder::decode_rice_partition(OutputT* out_ptr, uint8_t rice_param, uint32_t partition_count) {
+    // Residuals are always decoded as int32_t even on the int64_t (wide-side) path.
+    // Per RFC 9639 §9.2.7.3, Rice-coded residuals must fit in a signed 32-bit two's
+    // complement integer (excluding INT32_MIN), so int32_t is sufficient regardless
+    // of the output sample type.
+    uint32_t sample_idx = this->residual_.sample_idx;
+
+    // Hoist bit-reader state into a stack-local struct so the compiler can
+    // keep it in registers across the loop instead of reloading through this->
+    // on every iteration. Shared between the resume prefix and the hot loop
+    // so we don't pay an extra store/load around the resume.
+    BitReaderLocal st{};
+    st.bit_buffer = this->bit_buffer_;
+    st.bit_buffer_length = this->bit_buffer_length_;
+    st.buffer = this->buffer_;
+    st.buffer_index = this->buffer_index_;
+    st.bytes_left = this->bytes_left_;
+
+    bool oo_d = false;
+    uint32_t unary_pending = 0;
+    bool binary_pending = false;
+
+    // Precompute the Rice mask and try to pin it to a register across the loop.
+    // On Xtensa, GCC otherwise spills the mask to the stack and reloads it
+    // inside the inlined binary extraction on every sample (an extra l32i per
+    // residual on the hot path). Binding to a15m, the last callee-saved
+    // general-purpose register in the current window, keeps it live without
+    // displacing the bit-reader state that's already hot in registers.
+#if defined(__xtensa__) || defined(__XTENSA__)
+    register uint32_t rice_mask asm("a15") = (static_cast<uint32_t>(1) << rice_param) - 1;
+#else
+    const uint32_t rice_mask = (static_cast<uint32_t>(1) << rice_param) - 1;
+#endif
+
+    // If resuming mid-rice-read, finish that one sample on the resume path
+    // before entering the non-resuming hot loop. Rice parameter is < 32
+    // (see note inside read_rice_sint_local); the assert here guards that
+    // invariant locally.
+    if (FLAC_UNLIKELY(this->rice_.pending)) {
+        assert(rice_param < 32);
+        int32_t val = read_rice_sint_local<true>(st, rice_param, rice_mask, &oo_d, &unary_pending,
+                                                 &binary_pending, this->rice_.unary_count,
+                                                 this->rice_.binary_pending);
+        if (FLAC_UNLIKELY(oo_d)) {
+            this->bit_buffer_ = st.bit_buffer;
+            this->bit_buffer_length_ = static_cast<uint8_t>(st.bit_buffer_length);
+            this->buffer_index_ = st.buffer_index;
+            this->bytes_left_ = st.bytes_left;
+            this->out_of_data_ = true;
+            this->rice_.unary_count = unary_pending;
+            this->rice_.binary_pending = binary_pending;
+            this->residual_.sample_idx = sample_idx;
+            return FLAC_DECODER_NEED_MORE_DATA;
+        }
+        out_ptr[sample_idx] = val;
+        sample_idx++;
+        this->rice_.pending = false;
+    }
+
+    for (; sample_idx < partition_count; sample_idx++) {
+        int32_t val =
+            read_rice_sint_local(st, rice_param, rice_mask, &oo_d, &unary_pending, &binary_pending);
+        if (FLAC_UNLIKELY(oo_d)) {
+            this->bit_buffer_ = st.bit_buffer;
+            this->bit_buffer_length_ = static_cast<uint8_t>(st.bit_buffer_length);
+            this->buffer_index_ = st.buffer_index;
+            this->bytes_left_ = st.bytes_left;
+            this->out_of_data_ = true;
+            this->rice_.unary_count = unary_pending;
+            this->rice_.binary_pending = binary_pending;
+            this->rice_.pending = true;
+            this->residual_.sample_idx = sample_idx;
+            return FLAC_DECODER_NEED_MORE_DATA;
+        }
+        out_ptr[sample_idx] = val;
+    }
+
+    this->bit_buffer_ = st.bit_buffer;
+    this->bit_buffer_length_ = static_cast<uint8_t>(st.bit_buffer_length);
+    this->buffer_index_ = st.buffer_index;
+    this->bytes_left_ = st.bytes_left;
+    this->residual_.sample_idx = sample_idx;
+    return FLAC_DECODER_SUCCESS;
+}
+
+template FLACDecoderResult FLACDecoder::decode_rice_partition<int32_t>(int32_t*, uint8_t, uint32_t);
+template FLACDecoderResult FLACDecoder::decode_rice_partition<int64_t>(int64_t*, uint8_t, uint32_t);
 
 FLAC_HOT FLACDecoderResult FLACDecoder::read_partition_param(uint32_t block_size,
                                                              uint32_t warm_up_samples) {
@@ -1417,54 +1479,6 @@ FLAC_HOT FLACDecoderResult FLACDecoder::read_partition_param(uint32_t block_size
     return FLAC_DECODER_SUCCESS;
 }
 
-template <bool Resuming>
-FLAC_ALWAYS_INLINE int32_t FLACDecoder::read_rice_sint(uint8_t param) {
-    uint32_t unary_count = Resuming ? this->rice_.unary_count : 0;
-
-    if (!Resuming || !this->rice_.binary_pending) {
-        // Unary phase: count leading zeros
-        while (true) {
-            if (this->bit_buffer_length_ == 0) {
-                if (FLAC_UNLIKELY(this->refill_bit_buffer())) {
-                    this->rice_.unary_count = unary_count;
-                    this->rice_.binary_pending = false;
-                    this->out_of_data_ = true;
-                    return 0;
-                }
-            }
-
-            bit_buffer_t shifted_buffer = this->bit_buffer_
-                                          << (BIT_BUFFER_BITS - this->bit_buffer_length_);
-
-            if (FLAC_UNLIKELY(shifted_buffer == 0)) {
-                unary_count += this->bit_buffer_length_;
-                this->bit_buffer_length_ = 0;
-                continue;
-            }
-
-            uint32_t leading_zeros = static_cast<uint32_t>(FLAC_CLZ(shifted_buffer));
-            unary_count += leading_zeros;
-            this->bit_buffer_length_ =
-                static_cast<uint8_t>(this->bit_buffer_length_ - (leading_zeros + 1));
-            break;
-        }
-    }
-
-    // Binary phase: read rice parameter bits
-    uint32_t binary = this->read_uint(param);
-    if (FLAC_UNLIKELY(this->out_of_data_)) {
-        this->rice_.unary_count = unary_count;
-        this->rice_.binary_pending = true;
-        return 0;
-    }
-
-    // Rice parameter is at most 30 (5-bit param, with 31 reserved as escape code),
-    // so shifting a uint32_t left by param is always well-defined.
-    assert(param < 32);
-    uint32_t value = (unary_count << param) | binary;
-    return static_cast<int32_t>((value >> 1) ^ -(value & 1));
-}
-
 void FLACDecoder::drain_remaining_to_bit_buffer() {
     // Drain unconsumed bytes from user's buffer into bit_buffer_.
     // Safe because: when read_uint fails, bit_buffer_length_ + 8*bytes_left_ < BIT_BUFFER_BITS
@@ -1480,146 +1494,24 @@ void FLACDecoder::drain_remaining_to_bit_buffer() {
 // Bit Stream Reading
 // ============================================================================
 
-FLAC_ALWAYS_INLINE bool FLACDecoder::refill_bit_buffer() {
-    // ESP-IDF disables jump tables by default (-fno-jump-tables), so a switch statement
-    // compiles to a chain of comparisons anyway. Using explicit if/else with FLAC_LIKELY
-    // on the hot path lets the compiler prioritize it.
-    //
-    // All paths overwrite bit_buffer_ with only the newly loaded bytes. Old bits are NOT
-    // preserved. This is safe because both callers handle old bits before calling refill:
-    //   - read_uint() extracts old bits into its local `result` before calling refill
-    //   - read_rice_sint() only calls refill when bit_buffer_length_ == 0 (no old bits)
-#if (BIT_BUFFER_BITS == 64)
-    if (FLAC_LIKELY(this->bytes_left_ >= 8)) {
-        // 8 or more bytes available: load 8 bytes big-endian
-        this->bit_buffer_ = (static_cast<uint64_t>(this->buffer_[this->buffer_index_]) << 56) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 1]) << 48) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 2]) << 40) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 3]) << 32) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 4]) << 24) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 5]) << 16) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 6]) << 8) |
-                            this->buffer_[this->buffer_index_ + 7];
-        this->buffer_index_ += 8;
-        this->bytes_left_ -= 8;
-        this->bit_buffer_length_ = 64;
-        return false;
-    }
-    if (this->bytes_left_ == 7) {
-        this->bit_buffer_ = (static_cast<uint64_t>(this->buffer_[this->buffer_index_]) << 48) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 1]) << 40) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 2]) << 32) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 3]) << 24) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 4]) << 16) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 5]) << 8) |
-                            this->buffer_[this->buffer_index_ + 6];
-        this->buffer_index_ += 7;
-        this->bit_buffer_length_ = 56;
-        this->bytes_left_ = 0;
-        return false;
-    }
-    if (this->bytes_left_ == 6) {
-        this->bit_buffer_ = (static_cast<uint64_t>(this->buffer_[this->buffer_index_]) << 40) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 1]) << 32) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 2]) << 24) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 3]) << 16) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 4]) << 8) |
-                            this->buffer_[this->buffer_index_ + 5];
-        this->buffer_index_ += 6;
-        this->bit_buffer_length_ = 48;
-        this->bytes_left_ = 0;
-        return false;
-    }
-    if (this->bytes_left_ == 5) {
-        this->bit_buffer_ = (static_cast<uint64_t>(this->buffer_[this->buffer_index_]) << 32) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 1]) << 24) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 2]) << 16) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 3]) << 8) |
-                            this->buffer_[this->buffer_index_ + 4];
-        this->buffer_index_ += 5;
-        this->bit_buffer_length_ = 40;
-        this->bytes_left_ = 0;
-        return false;
-    }
-    if (this->bytes_left_ == 4) {
-        this->bit_buffer_ = (static_cast<uint64_t>(this->buffer_[this->buffer_index_]) << 24) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 1]) << 16) |
-                            (static_cast<uint64_t>(this->buffer_[this->buffer_index_ + 2]) << 8) |
-                            this->buffer_[this->buffer_index_ + 3];
-        this->buffer_index_ += 4;
-        this->bit_buffer_length_ = 32;
-        this->bytes_left_ = 0;
-        return false;
-    }
-#else
-    if (FLAC_LIKELY(this->bytes_left_ >= 4)) {
-        // 4 or more bytes available: load 4 bytes big-endian
-        this->bit_buffer_ = (static_cast<uint32_t>(this->buffer_[this->buffer_index_]) << 24) |
-                            (static_cast<uint32_t>(this->buffer_[this->buffer_index_ + 1]) << 16) |
-                            (static_cast<uint32_t>(this->buffer_[this->buffer_index_ + 2]) << 8) |
-                            this->buffer_[this->buffer_index_ + 3];
-        this->buffer_index_ += 4;
-        this->bytes_left_ -= 4;
-        this->bit_buffer_length_ = 32;
-        return false;
-    }
-#endif
-    if (this->bytes_left_ == 3) {
-        this->bit_buffer_ =
-            (static_cast<bit_buffer_t>(this->buffer_[this->buffer_index_]) << 16) |
-            (static_cast<bit_buffer_t>(this->buffer_[this->buffer_index_ + 1]) << 8) |
-            this->buffer_[this->buffer_index_ + 2];
-        this->buffer_index_ += 3;
-        this->bit_buffer_length_ = 24;
-        this->bytes_left_ = 0;
-        return false;
-    }
-    if (this->bytes_left_ == 2) {
-        this->bit_buffer_ = (static_cast<bit_buffer_t>(this->buffer_[this->buffer_index_]) << 8) |
-                            this->buffer_[this->buffer_index_ + 1];
-        this->buffer_index_ += 2;
-        this->bit_buffer_length_ = 16;
-        this->bytes_left_ = 0;
-        return false;
-    }
-    if (this->bytes_left_ == 1) {
-        this->bit_buffer_ = this->buffer_[this->buffer_index_];
-        this->buffer_index_ += 1;
-        this->bit_buffer_length_ = 8;
-        this->bytes_left_ = 0;
-        return false;
-    }
-    return true;
-}
-
 FLAC_ALWAYS_INLINE uint32_t FLACDecoder::read_uint(uint8_t num_bits) {
-    uint32_t result = 0;
+    BitReaderLocal s{};
+    s.bit_buffer = this->bit_buffer_;
+    s.bit_buffer_length = this->bit_buffer_length_;
+    s.buffer = this->buffer_;
+    s.buffer_index = this->buffer_index_;
+    s.bytes_left = this->bytes_left_;
 
-    if (num_bits > this->bit_buffer_length_) {
-        const uint32_t new_bits_needed = num_bits - this->bit_buffer_length_;
-        size_t bytes_needed = (new_bits_needed + 7) / 8;
+    bool oo_d = false;
+    const uint32_t result = read_uint_local(s, num_bits, oo_d);
 
-        if (FLAC_UNLIKELY(this->bytes_left_ < bytes_needed)) {
-            this->out_of_data_ = true;
-            return 0;
-        }
-
-        if (new_bits_needed < BIT_BUFFER_BITS) {
-            // Some of the current bits will be used in the result
-            result = static_cast<uint32_t>(this->bit_buffer_ << new_bits_needed);
-        }
-
-        this->refill_bit_buffer();
-        this->bit_buffer_length_ = static_cast<uint8_t>(this->bit_buffer_length_ - new_bits_needed);
-    } else {
-        this->bit_buffer_length_ -= num_bits;
+    this->bit_buffer_ = s.bit_buffer;
+    this->bit_buffer_length_ = static_cast<uint8_t>(s.bit_buffer_length);
+    this->buffer_index_ = s.buffer_index;
+    this->bytes_left_ = s.bytes_left;
+    if (FLAC_UNLIKELY(oo_d)) {
+        this->out_of_data_ = true;
     }
-
-    result |= static_cast<uint32_t>(this->bit_buffer_ >>
-                                    (this->bit_buffer_length_ & BIT_BUFFER_SHIFT_MASK));
-
-    result &= uint_mask(num_bits);
-
     return result;
 }
 

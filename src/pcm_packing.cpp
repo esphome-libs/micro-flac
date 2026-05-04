@@ -95,6 +95,50 @@ static void write_samples_16bit_2ch(uint8_t* output_buffer, const int32_t* block
 }
 
 FLAC_OPTIMIZE_O3
+static void write_samples_24bit_2ch_aligned(uint8_t* output_buffer, const int32_t* block_samples,
+                                            uint32_t block_size) {
+    // 24-bit stereo fast path for 4-byte-aligned buffers. Packs 2 stereo
+    // pairs (12 bytes) into 3 uint32_t stores per iteration instead of 12
+    // byte stores. Caller has verified output_buffer alignment.
+    //
+    // Byte layout of 2 stereo pairs in memory (little-endian):
+    //   L0[0] L0[1] L0[2] R0[0]   R0[1] R0[2] L1[0] L1[1]   L1[2] R1[0] R1[1] R1[2]
+    //   \------ word0 ------/     \------ word1 ------/     \------ word2 ------/
+    uint32_t* out32 = reinterpret_cast<uint32_t*>(output_buffer);
+    const int32_t* left = block_samples;
+    const int32_t* right = block_samples + block_size;
+
+    uint32_t i = 0;
+    const uint32_t unroll_limit = block_size & ~1U;
+
+    for (; i < unroll_limit; i += 2) {
+        const uint32_t l0 = static_cast<uint32_t>(left[i]);
+        const uint32_t r0 = static_cast<uint32_t>(right[i]);
+        const uint32_t l1 = static_cast<uint32_t>(left[i + 1]);
+        const uint32_t r1 = static_cast<uint32_t>(right[i + 1]);
+
+        out32[0] = (l0 & 0xFFFFFFU) | (r0 << 24);       // NOLINT(readability-magic-numbers)
+        out32[1] = ((r0 >> 8) & 0xFFFFU) | (l1 << 16);  // NOLINT(readability-magic-numbers)
+        out32[2] = ((l1 >> 16) & 0xFFU) | (r1 << 8);    // NOLINT(readability-magic-numbers)
+        out32 += 3;
+    }
+
+    // Odd-count tail: one stereo sample (6 bytes) remains. Fall back to byte
+    // stores for the final pair to keep the 2-sample fast path simple.
+    if (i < block_size) {
+        uint8_t* tail = reinterpret_cast<uint8_t*>(out32);
+        const int32_t sample_l = left[i];
+        const int32_t sample_r = right[i];
+        tail[0] = static_cast<uint8_t>(sample_l & 0xFF);
+        tail[1] = static_cast<uint8_t>((sample_l >> 8) & 0xFF);
+        tail[2] = static_cast<uint8_t>((sample_l >> 16) & 0xFF);
+        tail[3] = static_cast<uint8_t>(sample_r & 0xFF);
+        tail[4] = static_cast<uint8_t>((sample_r >> 8) & 0xFF);
+        tail[5] = static_cast<uint8_t>((sample_r >> 16) & 0xFF);
+    }
+}
+
+FLAC_OPTIMIZE_O3
 static void write_samples_24bit_2ch(uint8_t* output_buffer, const int32_t* block_samples,
                                     uint32_t block_size) {
     // 24-bit stereo fast path with 2-sample unrolling (due to larger sample size)
@@ -245,6 +289,8 @@ void write_samples(uint8_t* output_buffer, const int32_t* block_samples, uint32_
             write_samples_16bit_1ch(output_buffer, block_samples, block_size);
         } else if (aligned_2 && bits_per_sample == 16 && num_channels == 2) {
             write_samples_16bit_2ch(output_buffer, block_samples, block_size);
+        } else if (aligned_4 && bits_per_sample == 24 && num_channels == 2) {
+            write_samples_24bit_2ch_aligned(output_buffer, block_samples, block_size);
         } else if (bits_per_sample == 24 && num_channels == 2) {
             write_samples_24bit_2ch(output_buffer, block_samples, block_size);
         } else {
