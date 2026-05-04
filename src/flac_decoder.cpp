@@ -769,7 +769,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame(const uint8_t* buffer, size
     return FLAC_DECODER_ERROR_INTERNAL;
 }
 
-FLAC_HOT void FLACDecoder::reset_frame_state() {
+void FLACDecoder::reset_frame_state() {
     this->frame_ = FrameState{};
     this->subframe_ = SubframeState{};
     this->residual_ = ResidualState{};
