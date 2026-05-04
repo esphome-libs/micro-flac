@@ -123,8 +123,8 @@ static void write_samples_24bit_2ch_aligned(uint8_t* output_buffer, const int32_
         out32 += 3;
     }
 
-    // Odd-count tail: the next 3 bytes aren't word-aligned so fall back to
-    // byte stores for the final pair.
+    // Odd-count tail: one stereo sample (6 bytes) remains. Fall back to byte
+    // stores for the final pair to keep the 2-sample fast path simple.
     if (i < block_size) {
         uint8_t* tail = reinterpret_cast<uint8_t*>(out32);
         const int32_t sample_l = left[i];

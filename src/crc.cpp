@@ -258,7 +258,7 @@ uint16_t update_crc16(uint16_t crc_in, const uint8_t* data, size_t len) {
     // upper bits are harmless until we narrow on return.
     uint32_t crc = crc_in;
 
-    const uint8_t* end8 = data + (len & ~7U);  // Round down to multiple of 8
+    const uint8_t* end8 = data + (len & ~static_cast<size_t>(7));  // Round down to multiple of 8
 
 #if UINTPTR_MAX != 0xFFFFFFFF
     // On 64-bit hosts, process 8 bytes at a time using slicing-by-8
