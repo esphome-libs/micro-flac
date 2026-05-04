@@ -14,6 +14,7 @@
 
 #include "lpc.h"
 
+#include "compiler.h"
 #include "xtensa/lpc_xtensa.h"
 
 #include <cstdint>
@@ -79,8 +80,9 @@ static bool can_use_lpc_32bit(uint32_t bits_per_sample, const int32_t* coefs, ui
 }
 
 template <uint32_t ORDER>
-static void restore_lpc_32bit_order(int32_t* sub_frame_buffer, size_t num_of_samples,
-                                    const int32_t* coefs, int32_t shift) {
+FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_32bit_order(int32_t* sub_frame_buffer,
+                                                              size_t num_of_samples,
+                                                              const int32_t* coefs, int32_t shift) {
     const size_t outer_loop_bound = num_of_samples - ORDER;
 
     for (size_t i = 0; i < outer_loop_bound; ++i) {
@@ -92,8 +94,9 @@ static void restore_lpc_32bit_order(int32_t* sub_frame_buffer, size_t num_of_sam
     }
 }
 
-static void restore_lpc_32bit(int32_t* sub_frame_buffer, size_t num_of_samples,
-                              const int32_t* coefs, uint32_t order, int32_t shift) {
+FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_32bit(int32_t* sub_frame_buffer,
+                                                        size_t num_of_samples, const int32_t* coefs,
+                                                        uint32_t order, int32_t shift) {
 #if (FLAC_LPC_XTENSA_ENABLED == 1)
     // Use optimized assembly version for Xtensa
     restore_lpc_32bit_asm(sub_frame_buffer, num_of_samples, coefs, order, shift);
@@ -115,7 +118,7 @@ static void restore_lpc_32bit(int32_t* sub_frame_buffer, size_t num_of_samples,
         case 12: restore_lpc_32bit_order<12>(sub_frame_buffer, num_of_samples, coefs, shift); break;
             // NOLINTEND(readability-magic-numbers)
         // clang-format on
-        default: {
+        default:
             const size_t outer_loop_bound = num_of_samples - order;
             for (size_t i = 0; i < outer_loop_bound; ++i) {
                 int32_t sum = 0;
@@ -125,14 +128,14 @@ static void restore_lpc_32bit(int32_t* sub_frame_buffer, size_t num_of_samples,
                 sub_frame_buffer[i + order] += (sum >> shift);
             }
             break;
-        }
     }
 #endif
 }
 
 template <uint32_t ORDER>
-static void restore_lpc_64bit_order(int32_t* sub_frame_buffer, size_t num_of_samples,
-                                    const int32_t* coefs, int32_t shift) {
+FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_64bit_order(int32_t* sub_frame_buffer,
+                                                              size_t num_of_samples,
+                                                              const int32_t* coefs, int32_t shift) {
     const size_t outer_loop_bound = num_of_samples - ORDER;
 
     for (size_t i = 0; i < outer_loop_bound; ++i) {
@@ -144,8 +147,9 @@ static void restore_lpc_64bit_order(int32_t* sub_frame_buffer, size_t num_of_sam
     }
 }
 
-static void restore_lpc_64bit(int32_t* sub_frame_buffer, size_t num_of_samples,
-                              const int32_t* coefs, uint32_t order, int32_t shift) {
+FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_64bit(int32_t* sub_frame_buffer,
+                                                        size_t num_of_samples, const int32_t* coefs,
+                                                        uint32_t order, int32_t shift) {
 #if (FLAC_LPC_XTENSA_ENABLED == 1)
     // Use optimized 64-bit assembly version for Xtensa
     restore_lpc_64bit_asm(sub_frame_buffer, num_of_samples, coefs, order, shift);
@@ -167,7 +171,7 @@ static void restore_lpc_64bit(int32_t* sub_frame_buffer, size_t num_of_samples,
         case 12: restore_lpc_64bit_order<12>(sub_frame_buffer, num_of_samples, coefs, shift); break;
             // NOLINTEND(readability-magic-numbers)
         // clang-format on
-        default: {
+        default:
             const size_t outer_loop_bound = num_of_samples - order;
             for (size_t i = 0; i < outer_loop_bound; ++i) {
                 int64_t sum = 0;
@@ -178,13 +182,13 @@ static void restore_lpc_64bit(int32_t* sub_frame_buffer, size_t num_of_samples,
                 sub_frame_buffer[i + order] += static_cast<int32_t>(sum >> shift);
             }
             break;
-        }
     }
 #endif
 }
 
-void restore_lpc(int32_t* sub_frame_buffer, size_t num_of_samples, uint32_t bits_per_sample,
-                 const int32_t* coefs, uint32_t order, int32_t shift) {
+FLAC_NO_SANITIZE_OVERFLOW void restore_lpc(int32_t* sub_frame_buffer, size_t num_of_samples,
+                                           uint32_t bits_per_sample, const int32_t* coefs,
+                                           uint32_t order, int32_t shift) {
 #ifdef MICRO_FLAC_DUMP_LPC_VECTORS
     const uint32_t max_dump = 256;
     uint32_t save_count = (static_cast<uint32_t>(num_of_samples) < max_dump)
@@ -208,8 +212,9 @@ void restore_lpc(int32_t* sub_frame_buffer, size_t num_of_samples, uint32_t bits
 #endif
 }
 
-void restore_lpc(int64_t* sub_frame_buffer, size_t num_of_samples, uint32_t /*bits_per_sample*/,
-                 const int32_t* coefs, uint32_t order, int32_t shift) {
+FLAC_NO_SANITIZE_OVERFLOW void restore_lpc(int64_t* sub_frame_buffer, size_t num_of_samples,
+                                           uint32_t /*bits_per_sample*/, const int32_t* coefs,
+                                           uint32_t order, int32_t shift) {
     const size_t outer_loop_bound = num_of_samples - order;
 
     for (size_t i = 0; i < outer_loop_bound; ++i) {
