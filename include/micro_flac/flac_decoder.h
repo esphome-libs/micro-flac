@@ -560,10 +560,12 @@ private:
     /// @brief Read partition parameter and escape bits, advancing stage accordingly
     FLACDecoderResult read_partition_param(uint32_t block_size, uint32_t warm_up_samples);
 
-    /// @brief Read Rice-coded signed integer
-    /// @tparam Resuming  false = fresh read (hot path), true = resume after out-of-data
-    template <bool Resuming>
-    inline int32_t read_rice_sint(uint8_t param);
+    /// @brief Decode one non-escape Rice partition (out-of-lined on purpose).
+    /// Kept non-inline so the tight loop gets a clean register file, free of
+    /// pressure from the surrounding subframe state machine.
+    template <typename OutputT>
+    FLACDecoderResult decode_rice_partition(OutputT* out_ptr, uint8_t rice_param,
+                                            uint32_t partition_count);
 
     /// @brief Drain remaining unconsumed bytes from user buffer into bit_buffer_
     void drain_remaining_to_bit_buffer();
@@ -571,9 +573,6 @@ private:
     // ========================================
     // Bit Stream Reading
     // ========================================
-
-    /// @brief Refill bit buffer from input stream
-    inline bool refill_bit_buffer();
 
     /// @brief Read unsigned integer of specified bit width
     inline uint32_t read_uint(uint8_t num_bits);
