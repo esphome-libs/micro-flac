@@ -30,7 +30,7 @@ static FILE* lpc_dump_file() {
 }
 
 static void dump_lpc_vector(uint8_t is_64bit, uint32_t order, int32_t shift,
-                            uint32_t bits_per_sample, uint32_t num_samples, const int32_t* coefs,
+                            uint32_t bits_per_sample, uint32_t num_samples, const int16_t* coefs,
                             const int32_t* input_buffer, const int32_t* output_buffer) {
     const uint32_t max_dump_samples = 256;
     uint32_t dump_samples = (num_samples < max_dump_samples) ? num_samples : max_dump_samples;
@@ -46,7 +46,8 @@ static void dump_lpc_vector(uint8_t is_64bit, uint32_t order, int32_t shift,
     std::fwrite(&shift, 4, 1, f);
     std::fwrite(&bits_per_sample, 4, 1, f);
     std::fwrite(&dump_samples, 4, 1, f);
-    std::fwrite(coefs, 4, order, f);
+    // Coefs are int16_t in storage; downstream parsers must read 'order' int16_t values.
+    std::fwrite(coefs, sizeof(int16_t), order, f);
     std::fwrite(input_buffer, 4, dump_samples, f);
     std::fwrite(output_buffer, 4, dump_samples, f);
 }
@@ -54,7 +55,7 @@ static void dump_lpc_vector(uint8_t is_64bit, uint32_t order, int32_t shift,
 
 namespace micro_flac {
 
-static bool can_use_lpc_32bit(uint32_t bits_per_sample, const int32_t* coefs, uint32_t order,
+static bool can_use_lpc_32bit(uint32_t bits_per_sample, const int16_t* coefs, uint32_t order,
                               int32_t shift) {
     uint64_t max_abs_sample = static_cast<uint64_t>(1) << (bits_per_sample - 1);
 
@@ -82,7 +83,7 @@ static bool can_use_lpc_32bit(uint32_t bits_per_sample, const int32_t* coefs, ui
 template <uint32_t ORDER>
 FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_32bit_order(int32_t* sub_frame_buffer,
                                                               size_t num_of_samples,
-                                                              const int32_t* coefs, int32_t shift) {
+                                                              const int16_t* coefs, int32_t shift) {
     const size_t outer_loop_bound = num_of_samples - ORDER;
 
     for (size_t i = 0; i < outer_loop_bound; ++i) {
@@ -95,7 +96,7 @@ FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_32bit_order(int32_t* sub_frame
 }
 
 FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_32bit(int32_t* sub_frame_buffer,
-                                                        size_t num_of_samples, const int32_t* coefs,
+                                                        size_t num_of_samples, const int16_t* coefs,
                                                         uint32_t order, int32_t shift) {
 #if (FLAC_LPC_XTENSA_ENABLED == 1)
     // Use optimized assembly version for Xtensa
@@ -135,7 +136,7 @@ FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_32bit(int32_t* sub_frame_buffe
 template <uint32_t ORDER>
 FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_64bit_order(int32_t* sub_frame_buffer,
                                                               size_t num_of_samples,
-                                                              const int32_t* coefs, int32_t shift) {
+                                                              const int16_t* coefs, int32_t shift) {
     const size_t outer_loop_bound = num_of_samples - ORDER;
 
     for (size_t i = 0; i < outer_loop_bound; ++i) {
@@ -148,7 +149,7 @@ FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_64bit_order(int32_t* sub_frame
 }
 
 FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_64bit(int32_t* sub_frame_buffer,
-                                                        size_t num_of_samples, const int32_t* coefs,
+                                                        size_t num_of_samples, const int16_t* coefs,
                                                         uint32_t order, int32_t shift) {
 #if (FLAC_LPC_XTENSA_ENABLED == 1)
     // Use optimized 64-bit assembly version for Xtensa
@@ -187,7 +188,7 @@ FLAC_NO_SANITIZE_OVERFLOW static void restore_lpc_64bit(int32_t* sub_frame_buffe
 }
 
 FLAC_NO_SANITIZE_OVERFLOW void restore_lpc(int32_t* sub_frame_buffer, size_t num_of_samples,
-                                           uint32_t bits_per_sample, const int32_t* coefs,
+                                           uint32_t bits_per_sample, const int16_t* coefs,
                                            uint32_t order, int32_t shift) {
 #ifdef MICRO_FLAC_DUMP_LPC_VECTORS
     const uint32_t max_dump = 256;
@@ -213,7 +214,7 @@ FLAC_NO_SANITIZE_OVERFLOW void restore_lpc(int32_t* sub_frame_buffer, size_t num
 }
 
 FLAC_NO_SANITIZE_OVERFLOW void restore_lpc(int64_t* sub_frame_buffer, size_t num_of_samples,
-                                           uint32_t /*bits_per_sample*/, const int32_t* coefs,
+                                           uint32_t /*bits_per_sample*/, const int16_t* coefs,
                                            uint32_t order, int32_t shift) {
     const size_t outer_loop_bound = num_of_samples - order;
 

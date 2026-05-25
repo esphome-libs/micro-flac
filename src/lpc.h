@@ -34,11 +34,12 @@ namespace micro_flac {
 /// in-place)
 /// @param num_of_samples Total number of samples in the buffer
 /// @param bits_per_sample Bit depth of the audio samples
-/// @param coefs Pointer to array of LPC coefficients
+/// @param coefs Pointer to array of LPC coefficients. Stored as int16_t because the FLAC
+///        spec bounds precision to <= 15 bits (RFC 9639 §9.2.6, values in [-16384, 16383]).
 /// @param order Number of LPC coefficients (predictor order)
 /// @param shift Right shift amount to apply after prediction
 void restore_lpc(int32_t* sub_frame_buffer, size_t num_of_samples, uint32_t bits_per_sample,
-                 const int32_t* coefs, uint32_t order, int32_t shift);
+                 const int16_t* coefs, uint32_t order, int32_t shift);
 
 /// @brief Restore linear prediction for 33-bit MID_SIDE side channel
 ///
@@ -49,10 +50,10 @@ void restore_lpc(int32_t* sub_frame_buffer, size_t num_of_samples, uint32_t bits
 /// @param sub_frame_buffer Buffer containing int64_t warm-up samples followed by int64_t residuals
 /// @param num_of_samples Total number of samples in the buffer
 /// @param bits_per_sample Accepted for API symmetry with int32_t overload (unused)
-/// @param coefs Pointer to array of LPC coefficients (int32_t)
+/// @param coefs Pointer to array of LPC coefficients (see int32_t overload for type rationale)
 /// @param order Number of LPC coefficients (predictor order)
 /// @param shift Right shift amount to apply after prediction
 void restore_lpc(int64_t* sub_frame_buffer, size_t num_of_samples, uint32_t bits_per_sample,
-                 const int32_t* coefs, uint32_t order, int32_t shift);
+                 const int16_t* coefs, uint32_t order, int32_t shift);
 
 }  // namespace micro_flac

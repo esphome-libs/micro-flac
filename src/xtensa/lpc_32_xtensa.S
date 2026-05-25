@@ -63,7 +63,8 @@
  *
  * @param a2 Pointer to sub_frame_buffer (int32_t*)
  * @param a3 Number of samples (num_of_samples)
- * @param a4 Pointer to coefficients array (int32_t*)
+ * @param a4 Pointer to coefficients array (int16_t*; loaded via l16si which
+ *           sign-extends to 32-bit so the subsequent mull works unchanged)
  * @param a5 Number of coefficients (order)
  * @param a6 Shift amount (0-31)
  *
@@ -112,7 +113,7 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_1:
-    l32i a7, a4, 0                  // coef[0]
+    l16si a7, a4, 0                  // coef[0]
 
     loop a3, .Lloop_1_end
 .Lloop_1:
@@ -131,8 +132,8 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_2:
-    l32i a7, a4, 0                  // coef[0]
-    l32i a8, a4, 4                  // coef[1]
+    l16si a7, a4, 0                  // coef[0]
+    l16si a8, a4, 2                  // coef[1]
 
     loop a3, .Lloop_2_end
 .Lloop_2:
@@ -154,9 +155,9 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_3:
-    l32i a7, a4, 0                  // coef[0]
-    l32i a8, a4, 4                  // coef[1]
-    l32i a9, a4, 8                  // coef[2]
+    l16si a7, a4, 0                  // coef[0]
+    l16si a8, a4, 2                  // coef[1]
+    l16si a9, a4, 4                  // coef[2]
 
     loop a3, .Lloop_3_end
 .Lloop_3:
@@ -191,10 +192,10 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_4:
-    l32i a7, a4, 0                  // coef[0]
-    l32i a8, a4, 4                  // coef[1]
-    l32i a9, a4, 8                  // coef[2]
-    l32i a10, a4, 12                // coef[3]
+    l16si a7, a4, 0                  // coef[0]
+    l16si a8, a4, 2                  // coef[1]
+    l16si a9, a4, 4                  // coef[2]
+    l16si a10, a4, 6                // coef[3]
 
     loop a3, .Lloop_4_end
 .Lloop_4:
@@ -233,11 +234,11 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_5:
-    l32i a7, a4, 0                  // coef[0]
-    l32i a8, a4, 4                  // coef[1]
-    l32i a9, a4, 8                  // coef[2]
-    l32i a10, a4, 12                // coef[3]
-    l32i a11, a4, 16                // coef[4]
+    l16si a7, a4, 0                  // coef[0]
+    l16si a8, a4, 2                  // coef[1]
+    l16si a9, a4, 4                  // coef[2]
+    l16si a10, a4, 6                // coef[3]
+    l16si a11, a4, 8                // coef[4]
 
     loop a3, .Lloop_5_end
 .Lloop_5:
@@ -280,12 +281,12 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_6:
-    l32i a7, a4, 0                  // coef[0]
-    l32i a8, a4, 4                  // coef[1]
-    l32i a9, a4, 8                  // coef[2]
-    l32i a10, a4, 12                // coef[3]
-    l32i a11, a4, 16                // coef[4]
-    l32i a12, a4, 20                // coef[5]
+    l16si a7, a4, 0                  // coef[0]
+    l16si a8, a4, 2                  // coef[1]
+    l16si a9, a4, 4                  // coef[2]
+    l16si a10, a4, 6                // coef[3]
+    l16si a11, a4, 8                // coef[4]
+    l16si a12, a4, 10                // coef[5]
 
     loop a3, .Lloop_6_end
 .Lloop_6:
@@ -332,13 +333,13 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_7:
-    l32i a7, a4, 0                  // coef[0]
-    l32i a8, a4, 4                  // coef[1]
-    l32i a9, a4, 8                  // coef[2]
-    l32i a10, a4, 12                // coef[3]
-    l32i a11, a4, 16                // coef[4]
-    l32i a12, a4, 20                // coef[5]
-    l32i a13, a4, 24                // coef[6]
+    l16si a7, a4, 0                  // coef[0]
+    l16si a8, a4, 2                  // coef[1]
+    l16si a9, a4, 4                  // coef[2]
+    l16si a10, a4, 6                // coef[3]
+    l16si a11, a4, 8                // coef[4]
+    l16si a12, a4, 10                // coef[5]
+    l16si a13, a4, 12                // coef[6]
 
     loop a3, .Lloop_7_end
 .Lloop_7:
@@ -389,14 +390,14 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_8:
-    l32i a7, a4, 0                  // coef[0]
-    l32i a8, a4, 4                  // coef[1]
-    l32i a9, a4, 8                  // coef[2]
-    l32i a10, a4, 12                // coef[3]
-    l32i a11, a4, 16                // coef[4]
-    l32i a12, a4, 20                // coef[5]
-    l32i a13, a4, 24                // coef[6]
-    l32i a14, a4, 28                // coef[7]
+    l16si a7, a4, 0                  // coef[0]
+    l16si a8, a4, 2                  // coef[1]
+    l16si a9, a4, 4                  // coef[2]
+    l16si a10, a4, 6                // coef[3]
+    l16si a11, a4, 8                // coef[4]
+    l16si a12, a4, 10                // coef[5]
+    l16si a13, a4, 12                // coef[6]
+    l16si a14, a4, 14                // coef[7]
 
     loop a3, .Lloop_8_end
 .Lloop_8:
@@ -451,15 +452,15 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_9:
-    l32i a7, a4, 0                  // coef[0]
-    l32i a8, a4, 4                  // coef[1]
-    l32i a9, a4, 8                  // coef[2]
-    l32i a10, a4, 12                // coef[3]
-    l32i a11, a4, 16                // coef[4]
-    l32i a12, a4, 20                // coef[5]
-    l32i a13, a4, 24                // coef[6]
-    l32i a14, a4, 28                // coef[7]
-    l32i a15, a4, 32                // coef[8]
+    l16si a7, a4, 0                  // coef[0]
+    l16si a8, a4, 2                  // coef[1]
+    l16si a9, a4, 4                  // coef[2]
+    l16si a10, a4, 6                // coef[3]
+    l16si a11, a4, 8                // coef[4]
+    l16si a12, a4, 10                // coef[5]
+    l16si a13, a4, 12                // coef[6]
+    l16si a14, a4, 14                // coef[7]
+    l16si a15, a4, 16                // coef[8]
 
     loop a3, .Lloop_9_end
 .Lloop_9:
@@ -518,16 +519,16 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_10:
-    l32i a6, a4, 0                  // coef[0]
-    l32i a7, a4, 4                  // coef[1]
-    l32i a8, a4, 8                  // coef[2]
-    l32i a9, a4, 12                 // coef[3]
-    l32i a10, a4, 16                // coef[4]
-    l32i a11, a4, 20                // coef[5]
-    l32i a12, a4, 24                // coef[6]
-    l32i a13, a4, 28                // coef[7]
-    l32i a14, a4, 32                // coef[8]
-    l32i a15, a4, 36                // coef[9]
+    l16si a6, a4, 0                  // coef[0]
+    l16si a7, a4, 2                  // coef[1]
+    l16si a8, a4, 4                  // coef[2]
+    l16si a9, a4, 6                 // coef[3]
+    l16si a10, a4, 8                // coef[4]
+    l16si a11, a4, 10                // coef[5]
+    l16si a12, a4, 12                // coef[6]
+    l16si a13, a4, 14                // coef[7]
+    l16si a14, a4, 16                // coef[8]
+    l16si a15, a4, 18                // coef[9]
 
     loop a3, .Lloop_10_end
 .Lloop_10:
@@ -590,14 +591,14 @@ restore_lpc_32bit_asm:
 .Lorder_11:
     // Cache coef[0]-coef[7] in registers, keep pointer for coef[8]-coef[10]
     mov a7, a4                      // Save coef pointer for tail section
-    l32i a8, a4, 0                  // coef[0]
-    l32i a9, a4, 4                  // coef[1]
-    l32i a10, a4, 8                 // coef[2]
-    l32i a11, a4, 12                // coef[3]
-    l32i a12, a4, 16                // coef[4]
-    l32i a13, a4, 20                // coef[5]
-    l32i a14, a4, 24                // coef[6]
-    l32i a15, a4, 28                // coef[7]
+    l16si a8, a4, 0                  // coef[0]
+    l16si a9, a4, 2                  // coef[1]
+    l16si a10, a4, 4                 // coef[2]
+    l16si a11, a4, 6                // coef[3]
+    l16si a12, a4, 8                // coef[4]
+    l16si a13, a4, 10                // coef[5]
+    l16si a14, a4, 12                // coef[6]
+    l16si a15, a4, 14                // coef[7]
 
     loop a3, .Lloop_11_end
 .Lloop_11:
@@ -641,16 +642,16 @@ restore_lpc_32bit_asm:
 
     // === Tail section: MACs 8-10 (memory-loaded coefficients from a7) ===
     l32i a4, a2, 32                 // buffer[8]
-    l32i a6, a7, 32                 // coef[8]
+    l16si a6, a7, 16                 // coef[8]
 
     l32i a5, a2, 36                 // Pre-load buffer[9]
     mull a4, a4, a6
-    l32i a6, a7, 36                 // Pre-load coef[9]
+    l16si a6, a7, 18                 // Pre-load coef[9]
     add a3, a3, a4                  // Accumulate MAC 8
 
     l32i a4, a2, 40                 // Pre-load buffer[10]
     mull a5, a5, a6
-    l32i a6, a7, 40                 // Pre-load coef[10]
+    l16si a6, a7, 20                 // Pre-load coef[10]
     add a3, a3, a5                  // Accumulate MAC 9
 
     // MAC 10: last - no pre-load
@@ -673,14 +674,14 @@ restore_lpc_32bit_asm:
 .Lorder_12:
     // Cache coef[0]-coef[7] in registers, keep pointer for coef[8]-coef[11]
     mov a7, a4                      // Save coef pointer for tail section
-    l32i a8, a4, 0                  // coef[0]
-    l32i a9, a4, 4                  // coef[1]
-    l32i a10, a4, 8                 // coef[2]
-    l32i a11, a4, 12                // coef[3]
-    l32i a12, a4, 16                // coef[4]
-    l32i a13, a4, 20                // coef[5]
-    l32i a14, a4, 24                // coef[6]
-    l32i a15, a4, 28                // coef[7]
+    l16si a8, a4, 0                  // coef[0]
+    l16si a9, a4, 2                  // coef[1]
+    l16si a10, a4, 4                 // coef[2]
+    l16si a11, a4, 6                // coef[3]
+    l16si a12, a4, 8                // coef[4]
+    l16si a13, a4, 10                // coef[5]
+    l16si a14, a4, 12                // coef[6]
+    l16si a15, a4, 14                // coef[7]
 
     loop a3, .Lloop_12_end
 .Lloop_12:
@@ -724,21 +725,21 @@ restore_lpc_32bit_asm:
 
     // === Tail section: MACs 8-11 (memory-loaded coefficients from a7) ===
     l32i a4, a2, 32                 // buffer[8]
-    l32i a6, a7, 32                 // coef[8]
+    l16si a6, a7, 16                 // coef[8]
 
     l32i a5, a2, 36                 // Pre-load buffer[9]
     mull a4, a4, a6
-    l32i a6, a7, 36                 // Pre-load coef[9]
+    l16si a6, a7, 18                 // Pre-load coef[9]
     add a3, a3, a4                  // Accumulate MAC 8
 
     l32i a4, a2, 40                 // Pre-load buffer[10]
     mull a5, a5, a6
-    l32i a6, a7, 40                 // Pre-load coef[10]
+    l16si a6, a7, 20                 // Pre-load coef[10]
     add a3, a3, a5                  // Accumulate MAC 9
 
     l32i a5, a2, 44                 // Pre-load buffer[11]
     mull a4, a4, a6
-    l32i a6, a7, 44                 // Pre-load coef[11]
+    l16si a6, a7, 22                 // Pre-load coef[11]
     add a3, a3, a4                  // Accumulate MAC 10
 
     // MAC 11: last - no pre-load
@@ -778,8 +779,8 @@ restore_lpc_32bit_asm:
     loop a5, .Linner_generic_end
 .Linner_generic:
     l32i a9, a8, 0                  // buffer[i+j]
-    addx4 a10, a7, a4              // &coef[j]
-    l32i a10, a10, 0               // coef[j]
+    addx2 a10, a7, a4              // &coef[j]
+    l16si a10, a10, 0               // coef[j]
     mull a9, a9, a10               // buffer[i+j] * coef[j]
     add a6, a6, a9                  // sum += ...
 

@@ -76,7 +76,8 @@
  *
  * @param a2 Pointer to sub_frame_buffer (int32_t*)
  * @param a3 Number of samples (num_of_samples)
- * @param a4 Pointer to coefficients array (int32_t*)
+ * @param a4 Pointer to coefficients array (int16_t*; loaded via l16si which
+ *           sign-extends to 32-bit, then mull/mulsh produce the 64-bit product)
  * @param a5 Number of coefficients (order)
  * @param a6 Shift amount (0-31)
  *
@@ -148,7 +149,7 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_1:
-    l32i a8, a4, 0                 // coef[0]
+    l16si a8, a4, 0                 // coef[0]
 
     loop a7, .L64_loop_1_end
 
@@ -172,8 +173,8 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_2:
-    l32i a8, a4, 0                 // coef[0]
-    l32i a9, a4, 4                 // coef[1]
+    l16si a8, a4, 0                 // coef[0]
+    l16si a9, a4, 2                 // coef[1]
 
     loop a7, .L64_loop_2_end
     movi a3, 0                     // acc_low = 0
@@ -206,9 +207,9 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_3:
-    l32i a8, a4, 0                 // coef[0]
-    l32i a9, a4, 4                 // coef[1]
-    l32i a10, a4, 8                // coef[2]
+    l16si a8, a4, 0                 // coef[0]
+    l16si a9, a4, 2                 // coef[1]
+    l16si a10, a4, 4                // coef[2]
 
     loop a7, .L64_loop_3_end
     movi a3, 0
@@ -247,10 +248,10 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_4:
-    l32i a8, a4, 0                 // coef[0]
-    l32i a9, a4, 4                 // coef[1]
-    l32i a10, a4, 8                // coef[2]
-    l32i a11, a4, 12               // coef[3]
+    l16si a8, a4, 0                 // coef[0]
+    l16si a9, a4, 2                 // coef[1]
+    l16si a10, a4, 4                // coef[2]
+    l16si a11, a4, 6               // coef[3]
 
     loop a7, .L64_loop_4_end
     movi a3, 0
@@ -295,11 +296,11 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_5:
-    l32i a8, a4, 0                 // coef[0]
-    l32i a9, a4, 4                 // coef[1]
-    l32i a10, a4, 8                // coef[2]
-    l32i a11, a4, 12               // coef[3]
-    l32i a12, a4, 16               // coef[4]
+    l16si a8, a4, 0                 // coef[0]
+    l16si a9, a4, 2                 // coef[1]
+    l16si a10, a4, 4                // coef[2]
+    l16si a11, a4, 6               // coef[3]
+    l16si a12, a4, 8               // coef[4]
 
     loop a7, .L64_loop_5_end
     movi a3, 0
@@ -350,12 +351,12 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_6:
-    l32i a8, a4, 0                 // coef[0]
-    l32i a9, a4, 4                 // coef[1]
-    l32i a10, a4, 8                // coef[2]
-    l32i a11, a4, 12               // coef[3]
-    l32i a12, a4, 16               // coef[4]
-    l32i a13, a4, 20               // coef[5]
+    l16si a8, a4, 0                 // coef[0]
+    l16si a9, a4, 2                 // coef[1]
+    l16si a10, a4, 4                // coef[2]
+    l16si a11, a4, 6               // coef[3]
+    l16si a12, a4, 8               // coef[4]
+    l16si a13, a4, 10               // coef[5]
 
     loop a7, .L64_loop_6_end
     movi a3, 0
@@ -412,13 +413,13 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_7:
-    l32i a8, a4, 0                 // coef[0]
-    l32i a9, a4, 4                 // coef[1]
-    l32i a10, a4, 8                // coef[2]
-    l32i a11, a4, 12               // coef[3]
-    l32i a12, a4, 16               // coef[4]
-    l32i a13, a4, 20               // coef[5]
-    l32i a14, a4, 24               // coef[6]
+    l16si a8, a4, 0                 // coef[0]
+    l16si a9, a4, 2                 // coef[1]
+    l16si a10, a4, 4                // coef[2]
+    l16si a11, a4, 6               // coef[3]
+    l16si a12, a4, 8               // coef[4]
+    l16si a13, a4, 10               // coef[5]
+    l16si a14, a4, 12               // coef[6]
 
     loop a7, .L64_loop_7_end
     movi a3, 0
@@ -481,14 +482,14 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_8:
-    l32i a8, a4, 0                 // coef[0]
-    l32i a9, a4, 4                 // coef[1]
-    l32i a10, a4, 8                // coef[2]
-    l32i a11, a4, 12               // coef[3]
-    l32i a12, a4, 16               // coef[4]
-    l32i a13, a4, 20               // coef[5]
-    l32i a14, a4, 24               // coef[6]
-    l32i a15, a4, 28               // coef[7]
+    l16si a8, a4, 0                 // coef[0]
+    l16si a9, a4, 2                 // coef[1]
+    l16si a10, a4, 4                // coef[2]
+    l16si a11, a4, 6               // coef[3]
+    l16si a12, a4, 8               // coef[4]
+    l16si a13, a4, 10               // coef[5]
+    l16si a14, a4, 12               // coef[6]
+    l16si a15, a4, 14               // coef[7]
 
     loop a7, .L64_loop_8_end
     movi a3, 0
@@ -559,12 +560,12 @@ restore_lpc_64bit_asm:
 .L64_order_9:
     // Cache coef[0]-coef[5] in registers, keep pointer for coef[6]-coef[8]
     mov a9, a4                     // Save coef pointer for tail section
-    l32i a10, a4, 0                // coef[0]
-    l32i a11, a4, 4                // coef[1]
-    l32i a12, a4, 8                // coef[2]
-    l32i a13, a4, 12               // coef[3]
-    l32i a14, a4, 16               // coef[4]
-    l32i a15, a4, 20               // coef[5]
+    l16si a10, a4, 0                // coef[0]
+    l16si a11, a4, 2                // coef[1]
+    l16si a12, a4, 4                // coef[2]
+    l16si a13, a4, 6               // coef[3]
+    l16si a14, a4, 8               // coef[4]
+    l16si a15, a4, 10               // coef[5]
 
     loop a7, .L64_loop_9_end
     movi a3, 0                     // acc_low = 0
@@ -607,7 +608,7 @@ restore_lpc_64bit_asm:
     l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a15
     mulsh a6, a6, a15
-    l32i a8, a9, 24                // Pre-load coef[6]
+    l16si a8, a9, 12                // Pre-load coef[6]
     MAC64_CARRY a3, a4, a7, a6
 
     // === Tail section: MACs 6-8 (memory-loaded coefficients from a9) ===
@@ -615,14 +616,14 @@ restore_lpc_64bit_asm:
     l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l32i a8, a9, 28                // Pre-load coef[7]
+    l16si a8, a9, 14                // Pre-load coef[7]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 7: a6 * coef[7]
     l32i a5, a2, 32                // Pre-load buffer[8]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l32i a8, a9, 32                // Pre-load coef[8]
+    l16si a8, a9, 16                // Pre-load coef[8]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 8: a5 * coef[8] - last, no pre-loads
@@ -646,12 +647,12 @@ restore_lpc_64bit_asm:
 .L64_order_10:
     // Cache coef[0]-coef[5] in registers, keep pointer for coef[6]-coef[9]
     mov a9, a4                     // Save coef pointer for tail section
-    l32i a10, a4, 0                // coef[0]
-    l32i a11, a4, 4                // coef[1]
-    l32i a12, a4, 8                // coef[2]
-    l32i a13, a4, 12               // coef[3]
-    l32i a14, a4, 16               // coef[4]
-    l32i a15, a4, 20               // coef[5]
+    l16si a10, a4, 0                // coef[0]
+    l16si a11, a4, 2                // coef[1]
+    l16si a12, a4, 4                // coef[2]
+    l16si a13, a4, 6               // coef[3]
+    l16si a14, a4, 8               // coef[4]
+    l16si a15, a4, 10               // coef[5]
 
     loop a7, .L64_loop_10_end
     movi a3, 0                     // acc_low = 0
@@ -694,7 +695,7 @@ restore_lpc_64bit_asm:
     l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a15
     mulsh a6, a6, a15
-    l32i a8, a9, 24                // Pre-load coef[6]
+    l16si a8, a9, 12                // Pre-load coef[6]
     MAC64_CARRY a3, a4, a7, a6
 
     // === Tail section: MACs 6-9 (memory-loaded coefficients from a9) ===
@@ -702,21 +703,21 @@ restore_lpc_64bit_asm:
     l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l32i a8, a9, 28                // Pre-load coef[7]
+    l16si a8, a9, 14                // Pre-load coef[7]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 7: a6 * coef[7]
     l32i a5, a2, 32                // Pre-load buffer[8]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l32i a8, a9, 32                // Pre-load coef[8]
+    l16si a8, a9, 16                // Pre-load coef[8]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 8: a5 * coef[8]
     l32i a6, a2, 36                // Pre-load buffer[9]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l32i a8, a9, 36                // Pre-load coef[9]
+    l16si a8, a9, 18                // Pre-load coef[9]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 9: a6 * coef[9] - last, no pre-loads
@@ -740,12 +741,12 @@ restore_lpc_64bit_asm:
 .L64_order_11:
     // Cache coef[0]-coef[5] in registers, keep pointer for coef[6]-coef[10]
     mov a9, a4                     // Save coef pointer for tail section
-    l32i a10, a4, 0                // coef[0]
-    l32i a11, a4, 4                // coef[1]
-    l32i a12, a4, 8                // coef[2]
-    l32i a13, a4, 12               // coef[3]
-    l32i a14, a4, 16               // coef[4]
-    l32i a15, a4, 20               // coef[5]
+    l16si a10, a4, 0                // coef[0]
+    l16si a11, a4, 2                // coef[1]
+    l16si a12, a4, 4                // coef[2]
+    l16si a13, a4, 6               // coef[3]
+    l16si a14, a4, 8               // coef[4]
+    l16si a15, a4, 10               // coef[5]
 
     loop a7, .L64_loop_11_end
     movi a3, 0                     // acc_low = 0
@@ -788,7 +789,7 @@ restore_lpc_64bit_asm:
     l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a15
     mulsh a6, a6, a15
-    l32i a8, a9, 24                // Pre-load coef[6]
+    l16si a8, a9, 12                // Pre-load coef[6]
     MAC64_CARRY a3, a4, a7, a6
 
     // === Tail section: MACs 6-10 (memory-loaded coefficients from a9) ===
@@ -796,28 +797,28 @@ restore_lpc_64bit_asm:
     l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l32i a8, a9, 28                // Pre-load coef[7]
+    l16si a8, a9, 14                // Pre-load coef[7]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 7: a6 * coef[7]
     l32i a5, a2, 32                // Pre-load buffer[8]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l32i a8, a9, 32                // Pre-load coef[8]
+    l16si a8, a9, 16                // Pre-load coef[8]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 8: a5 * coef[8]
     l32i a6, a2, 36                // Pre-load buffer[9]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l32i a8, a9, 36                // Pre-load coef[9]
+    l16si a8, a9, 18                // Pre-load coef[9]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 9: a6 * coef[9]
     l32i a5, a2, 40                // Pre-load buffer[10]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l32i a8, a9, 40                // Pre-load coef[10]
+    l16si a8, a9, 20                // Pre-load coef[10]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 10: a5 * coef[10] - last, no pre-loads
@@ -841,12 +842,12 @@ restore_lpc_64bit_asm:
 .L64_order_12:
     // Cache coef[0]-coef[5] in registers, keep pointer for coef[6]-coef[11]
     mov a9, a4                     // Save coef pointer for tail section
-    l32i a10, a4, 0                // coef[0]
-    l32i a11, a4, 4                // coef[1]
-    l32i a12, a4, 8                // coef[2]
-    l32i a13, a4, 12               // coef[3]
-    l32i a14, a4, 16               // coef[4]
-    l32i a15, a4, 20               // coef[5]
+    l16si a10, a4, 0                // coef[0]
+    l16si a11, a4, 2                // coef[1]
+    l16si a12, a4, 4                // coef[2]
+    l16si a13, a4, 6               // coef[3]
+    l16si a14, a4, 8               // coef[4]
+    l16si a15, a4, 10               // coef[5]
 
     loop a7, .L64_loop_12_end
     movi a3, 0                     // acc_low = 0
@@ -889,7 +890,7 @@ restore_lpc_64bit_asm:
     l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a15
     mulsh a6, a6, a15
-    l32i a8, a9, 24                // Pre-load coef[6]
+    l16si a8, a9, 12                // Pre-load coef[6]
     MAC64_CARRY a3, a4, a7, a6
 
     // === Tail section: MACs 6-11 (memory-loaded coefficients from a9) ===
@@ -897,35 +898,35 @@ restore_lpc_64bit_asm:
     l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l32i a8, a9, 28                // Pre-load coef[7]
+    l16si a8, a9, 14                // Pre-load coef[7]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 7: a6 * coef[7]
     l32i a5, a2, 32                // Pre-load buffer[8]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l32i a8, a9, 32                // Pre-load coef[8]
+    l16si a8, a9, 16                // Pre-load coef[8]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 8: a5 * coef[8]
     l32i a6, a2, 36                // Pre-load buffer[9]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l32i a8, a9, 36                // Pre-load coef[9]
+    l16si a8, a9, 18                // Pre-load coef[9]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 9: a6 * coef[9]
     l32i a5, a2, 40                // Pre-load buffer[10]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l32i a8, a9, 40                // Pre-load coef[10]
+    l16si a8, a9, 20                // Pre-load coef[10]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 10: a5 * coef[10]
     l32i a6, a2, 44                // Pre-load buffer[11]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l32i a8, a9, 44                // Pre-load coef[11]
+    l16si a8, a9, 22                // Pre-load coef[11]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 11: a6 * coef[11] - last, no pre-loads
@@ -971,8 +972,8 @@ restore_lpc_64bit_asm:
     loop a5, .L64_inner_generic_end
 .L64_inner_generic:
     l32i a15, a14, 0               // buffer[i+j]
-    addx4 a9, a13, a4              // &coef[j]
-    l32i a3, a9, 0                 // coef[j]
+    addx2 a9, a13, a4              // &coef[j]
+    l16si a3, a9, 0                 // coef[j]
     addi a13, a13, 1               // j++ (fill: resolves a3 load-use)
 
     // 64-bit multiplication and accumulation
