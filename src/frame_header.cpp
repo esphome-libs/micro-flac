@@ -183,7 +183,6 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
         }
     }
 
-    // Validate that frame channel count matches STREAMINFO
     uint32_t frame_channels = 0;
     if (info.channel_assignment <= 7) {
         frame_channels = info.channel_assignment + 1;
@@ -203,7 +202,6 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
         return FLAC_DECODER_ERROR_FRAME_MISMATCH;
     }
 
-    // Validate that frame sample rate matches STREAMINFO
     if (frame_sample_rate != stream_info.sample_rate()) {
         return FLAC_DECODER_ERROR_FRAME_MISMATCH;
     }

@@ -37,7 +37,6 @@ void apply_channel_decorrelation(int32_t* block_samples, const SideT* side_chann
             block_samples[block_size + i + 2] = wsub32(block_samples[i + 2], side_channel[i + 2]);
             block_samples[block_size + i + 3] = wsub32(block_samples[i + 3], side_channel[i + 3]);
         }
-        // Handle remaining samples
         for (; i < block_size; i++) {
             block_samples[block_size + i] = wsub32(block_samples[i], side_channel[i]);
         }
@@ -51,7 +50,6 @@ void apply_channel_decorrelation(int32_t* block_samples, const SideT* side_chann
             block_samples[i + 2] = wadd32(side_channel[i + 2], block_samples[block_size + i + 2]);
             block_samples[i + 3] = wadd32(side_channel[i + 3], block_samples[block_size + i + 3]);
         }
-        // Handle remaining samples
         for (; i < block_size; i++) {
             block_samples[i] = wadd32(side_channel[i], block_samples[block_size + i]);
         }
@@ -83,7 +81,6 @@ void apply_channel_decorrelation(int32_t* block_samples, const SideT* side_chann
             block_samples[block_size + i + 3] = static_cast<int32_t>(right3);
             block_samples[i + 3] = static_cast<int32_t>(right3 + u32(side3));
         }
-        // Handle remaining samples
         for (; i < block_size; i++) {
             SideT side = side_channel[i];
             uint32_t right = u32(block_samples[i]) - u32(side >> 1);

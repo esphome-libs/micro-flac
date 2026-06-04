@@ -48,7 +48,6 @@ static void write_samples_16bit_1ch(uint8_t* output_buffer, const int32_t* block
     uint32_t i = 0;
     const uint32_t unroll_limit = block_size & ~3U;  // Round down to multiple of 4
 
-    // Process 4 samples at a time
     for (; i < unroll_limit; i += 4) {
         output_samples[i] = static_cast<int16_t>(samples[i]);
         output_samples[i + 1] = static_cast<int16_t>(samples[i + 1]);
@@ -56,7 +55,6 @@ static void write_samples_16bit_1ch(uint8_t* output_buffer, const int32_t* block
         output_samples[i + 3] = static_cast<int16_t>(samples[i + 3]);
     }
 
-    // Handle remaining samples
     for (; i < block_size; ++i) {
         output_samples[i] = static_cast<int16_t>(samples[i]);
     }
@@ -73,7 +71,6 @@ static void write_samples_16bit_2ch(uint8_t* output_buffer, const int32_t* block
     uint32_t i = 0;
     const uint32_t unroll_limit = block_size & ~3U;  // Round down to multiple of 4
 
-    // Process 4 samples at a time
     for (; i < unroll_limit; i += 4) {
         output_samples[0] = static_cast<int16_t>(left[i]);
         output_samples[1] = static_cast<int16_t>(right[i]);
@@ -86,7 +83,6 @@ static void write_samples_16bit_2ch(uint8_t* output_buffer, const int32_t* block
         output_samples += 8;
     }
 
-    // Handle remaining samples
     for (; i < block_size; ++i) {
         output_samples[0] = static_cast<int16_t>(left[i]);
         output_samples[1] = static_cast<int16_t>(right[i]);
@@ -146,7 +142,6 @@ static void write_samples_24bit_2ch(uint8_t* output_buffer, const int32_t* block
     uint32_t i = 0;
     const uint32_t unroll_limit = block_size & ~1U;  // Round down to multiple of 2
 
-    // Process 2 samples at a time
     for (; i < unroll_limit; i += 2) {
         // Sample 0 - Left and Right channels
         int32_t sample_0_l = block_samples[i];
@@ -171,7 +166,6 @@ static void write_samples_24bit_2ch(uint8_t* output_buffer, const int32_t* block
         output_buffer[output_index++] = static_cast<uint8_t>((sample_1_r >> 16) & 0xFF);
     }
 
-    // Handle remaining samples
     for (; i < block_size; ++i) {
         int32_t sample_l = block_samples[i];
         int32_t sample_r = block_samples[block_size + i];
@@ -195,7 +189,6 @@ static void write_samples_32bit_1ch(uint8_t* output_buffer, const int32_t* block
     uint32_t i = 0;
     const uint32_t unroll_limit = block_size & ~3U;  // Round down to multiple of 4
 
-    // Process 4 samples at a time
     for (; i < unroll_limit; i += 4) {
         output_samples[i] = wshl32(samples[i], shift_amount);
         output_samples[i + 1] = wshl32(samples[i + 1], shift_amount);
@@ -203,7 +196,6 @@ static void write_samples_32bit_1ch(uint8_t* output_buffer, const int32_t* block
         output_samples[i + 3] = wshl32(samples[i + 3], shift_amount);
     }
 
-    // Handle remaining samples
     for (; i < block_size; ++i) {
         output_samples[i] = wshl32(samples[i], shift_amount);
     }
@@ -220,7 +212,6 @@ static void write_samples_32bit_2ch(uint8_t* output_buffer, const int32_t* block
     uint32_t i = 0;
     const uint32_t unroll_limit = block_size & ~3U;  // Round down to multiple of 4
 
-    // Process 4 samples at a time
     for (; i < unroll_limit; i += 4) {
         output_samples[0] = wshl32(left[i], shift_amount);
         output_samples[1] = wshl32(right[i], shift_amount);
@@ -233,7 +224,6 @@ static void write_samples_32bit_2ch(uint8_t* output_buffer, const int32_t* block
         output_samples += 8;
     }
 
-    // Handle remaining samples
     for (; i < block_size; ++i) {
         output_samples[0] = wshl32(left[i], shift_amount);
         output_samples[1] = wshl32(right[i], shift_amount);

@@ -237,7 +237,6 @@ FLACDecoderResult FLACDecoder::decode_impl(const uint8_t* input, size_t input_le
             return FLAC_DECODER_NEED_MORE_DATA;
         }
 
-        // Check for "OggS" or "fLaC"
         if (this->detect_buffer_[0] == 'O' && this->detect_buffer_[1] == 'g' &&
             this->detect_buffer_[2] == 'g' && this->detect_buffer_[3] == 'S') {
 #ifndef MICRO_FLAC_DISABLE_OGG
@@ -580,7 +579,6 @@ FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_
                 return FLAC_DECODER_NEED_MORE_DATA;
             }
 
-            // Parse the completed 4-byte block header
             uint8_t* bh = this->header_parse_.block_header_buf;
             this->header_parse_.last_block = (bh[0] & 0x80) != 0;
             this->header_parse_.type = bh[0] & 0x7F;  // NOLINT(readability-magic-numbers)
@@ -845,7 +843,6 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_header_phase(const uint8_t*
         return FLAC_DECODER_NEED_MORE_DATA;
     }
 
-    // Parse the exact-length header buffer
     FrameHeaderInfo header_info{};
     FLACDecoderResult ret =
         parse_frame_header(this->frame_.header_buffer, this->frame_.header_buffer_len,
@@ -873,7 +870,6 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_header_phase(const uint8_t*
 
     this->frame_.header_buffer_len = 0;
 
-    // Set up for subframe decoding
     this->frame_.stage = FrameDecodeStage::SUBFRAME;
     this->frame_.resuming = false;
     this->frame_.channel_idx = 0;
@@ -941,7 +937,6 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_footer_phase(const uint8_t*
         return FLAC_DECODER_NEED_MORE_DATA;
     }
 
-    // Validate CRC-16
     if (this->enable_crc_check_ && crc_read != this->frame_.running_crc16) {
         return FLAC_DECODER_ERROR_CRC_MISMATCH;
     }
@@ -1083,7 +1078,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
                 // Handle wasted bits: each read_uint(1) is atomic.
                 // Bound `shift` inside the loop so pathological input (an unbounded run
                 // of zero bits) is rejected immediately rather than wasting CPU until the
-                // post-loop validator below fires; verified zero-cost on ESP32-S3.
+                // post-loop validator below fires.
                 if (this->subframe_.shift >= 1) {
                     while (true) {
                         uint32_t bit = this->read_uint(1);
@@ -1107,7 +1102,6 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
                 }
                 this->subframe_.bits_per_sample = bits_per_sample - this->subframe_.shift;
 
-                // Dispatch based on type
                 if (this->subframe_.type == 0) {
                     this->subframe_.stage = SubframeDecodeStage::SUBFRAME_CONSTANT;
                 } else if (this->subframe_.type == 1) {
