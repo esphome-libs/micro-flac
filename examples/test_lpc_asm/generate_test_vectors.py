@@ -46,8 +46,9 @@ def parse_vectors(filepath):
         order, shift, bits_per_sample, num_samples = struct.unpack_from("<IiII", data, offset)
         offset += 16
 
-        coefs = list(struct.unpack_from(f"<{order}i", data, offset))
-        offset += 4 * order
+        # Coefficients are stored as int16_t in the dump (FLAC qlp precision <= 15 bits).
+        coefs = list(struct.unpack_from(f"<{order}h", data, offset))
+        offset += 2 * order
 
         input_buf = list(struct.unpack_from(f"<{num_samples}i", data, offset))
         offset += 4 * num_samples
@@ -265,9 +266,9 @@ def print_coverage(vectors):
             print(f"WARNING: No vectors for order {o}")
 
 
-def format_array(name, values, per_line=8):
+def format_array(name, values, c_type="int32_t", per_line=8):
     """Format a C array."""
-    lines = [f"static const int32_t {name}[] = {{"]
+    lines = [f"static const {c_type} {name}[] = {{"]
     for i in range(0, len(values), per_line):
         chunk = values[i:i + per_line]
         formatted = ", ".join(str(v) for v in chunk)
@@ -293,14 +294,14 @@ def generate_header(vectors, output_path):
     lines.append("    int32_t shift;")
     lines.append("    uint32_t bits_per_sample;")
     lines.append("    uint32_t num_samples;")
-    lines.append("    const int32_t* coefficients;")
+    lines.append("    const int16_t* coefficients;")
     lines.append("    const int32_t* input_buffer;")
     lines.append("    const int32_t* expected_output;")
     lines.append("} LpcTestVector;")
     lines.append("")
 
     for i, v in enumerate(vectors):
-        lines.append(format_array(f"vec_{i}_coefs", v["coefs"]))
+        lines.append(format_array(f"vec_{i}_coefs", v["coefs"], c_type="int16_t"))
         lines.append("")
         lines.append(format_array(f"vec_{i}_input", v["input"]))
         lines.append("")

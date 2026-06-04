@@ -46,13 +46,13 @@ static constexpr uint8_t SUBFRAME_LPC_MAX = 63;
 // Order 2: [-1, 2]
 // Order 3: [1, -3, 3]
 // Order 4: [-1, 4, -6, 4]
-static constexpr int32_t FIXED_COEFFICIENTS_1[] = {1};
-static constexpr int32_t FIXED_COEFFICIENTS_2[] = {-1, 2};
-static constexpr int32_t FIXED_COEFFICIENTS_3[] = {1, -3, 3};
-static constexpr int32_t FIXED_COEFFICIENTS_4[] = {-1, 4, -6, 4};
+static constexpr int16_t FIXED_COEFFICIENTS_1[] = {1};
+static constexpr int16_t FIXED_COEFFICIENTS_2[] = {-1, 2};
+static constexpr int16_t FIXED_COEFFICIENTS_3[] = {1, -3, 3};
+static constexpr int16_t FIXED_COEFFICIENTS_4[] = {-1, 4, -6, 4};
 
 // Index 0 is nullptr (order 0 has no coefficients; the LPC loop iterates 0 times)
-static constexpr const int32_t* FIXED_COEFFICIENTS[] = {nullptr, FIXED_COEFFICIENTS_1,
+static constexpr const int16_t* FIXED_COEFFICIENTS[] = {nullptr, FIXED_COEFFICIENTS_1,
                                                         FIXED_COEFFICIENTS_2, FIXED_COEFFICIENTS_3,
                                                         FIXED_COEFFICIENTS_4};
 
@@ -102,16 +102,14 @@ FLACDecoder::HeaderParseState::~HeaderParseState() {
 
 FLACDecoder::HeaderParseState::HeaderParseState(HeaderParseState&& other) noexcept
     : data(other.data),
-      data_capacity(other.data_capacity),
-      type(other.type),
       length(other.length),
       bytes_read(other.bytes_read),
+      type(other.type),
       block_header_len(other.block_header_len),
       in_progress(other.in_progress),
       last_block(other.last_block) {
     std::memcpy(this->block_header_buf, other.block_header_buf, sizeof(this->block_header_buf));
     other.data = nullptr;
-    other.data_capacity = 0;
 }
 
 FLACDecoder::HeaderParseState& FLACDecoder::HeaderParseState::operator=(
@@ -121,16 +119,14 @@ FLACDecoder::HeaderParseState& FLACDecoder::HeaderParseState::operator=(
             FLAC_FREE(this->data);
         }
         this->data = other.data;
-        this->data_capacity = other.data_capacity;
-        this->type = other.type;
         this->length = other.length;
         this->bytes_read = other.bytes_read;
         std::memcpy(this->block_header_buf, other.block_header_buf, sizeof(this->block_header_buf));
+        this->type = other.type;
         this->block_header_len = other.block_header_len;
         this->in_progress = other.in_progress;
         this->last_block = other.last_block;
         other.data = nullptr;
-        other.data_capacity = 0;
     }
     return *this;
 }
@@ -143,6 +139,10 @@ FLACDecoder::FLACDecoder() = default;
 
 FLACDecoder::~FLACDecoder() {
     this->free_buffers();
+    if (this->max_metadata_sizes_) {
+        FLAC_FREE(this->max_metadata_sizes_);
+        this->max_metadata_sizes_ = nullptr;
+    }
 }
 
 void FLACDecoder::reset() {
@@ -287,6 +287,17 @@ void FLACDecoder::set_max_metadata_size(FLACMetadataType type, uint32_t max_size
     size_t index = (static_cast<size_t>(type) < METADATA_SIZE_LIMITS_COUNT - 1)
                        ? static_cast<size_t>(type)
                        : METADATA_SIZE_LIMITS_COUNT - 1;
+    if (!this->max_metadata_sizes_) {
+        if (max_size == 0) {
+            return;
+        }
+        this->max_metadata_sizes_ =
+            static_cast<uint32_t*>(FLAC_MALLOC(METADATA_SIZE_LIMITS_COUNT * sizeof(uint32_t)));
+        if (!this->max_metadata_sizes_) {
+            return;
+        }
+        std::memset(this->max_metadata_sizes_, 0, METADATA_SIZE_LIMITS_COUNT * sizeof(uint32_t));
+    }
     this->max_metadata_sizes_[index] = max_size;
 }
 
@@ -295,7 +306,21 @@ uint32_t FLACDecoder::get_max_metadata_size(FLACMetadataType type) const {
     size_t index = (static_cast<size_t>(type) < METADATA_SIZE_LIMITS_COUNT - 1)
                        ? static_cast<size_t>(type)
                        : METADATA_SIZE_LIMITS_COUNT - 1;
-    return this->max_metadata_sizes_[index];
+    return this->max_metadata_sizes_ ? this->max_metadata_sizes_[index] : 0;
+}
+
+const std::vector<FLACMetadataBlock>& FLACDecoder::get_metadata_blocks() const {
+    static const std::vector<FLACMetadataBlock> EMPTY_METADATA_BLOCKS;
+    return this->metadata_blocks_ ? *this->metadata_blocks_ : EMPTY_METADATA_BLOCKS;
+}
+
+const FLACMetadataBlock* FLACDecoder::get_metadata_block(FLACMetadataType type) const {
+    for (const auto& block : this->get_metadata_blocks()) {
+        if (block.type == type) {
+            return &block;
+        }
+    }
+    return nullptr;
 }
 
 // ============================================================================
@@ -504,11 +529,12 @@ FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_
     bytes_consumed = 0;
 
     if (!this->header_parse_.in_progress) {
-        this->metadata_blocks_.clear();
+        if (this->metadata_blocks_) {
+            this->metadata_blocks_->clear();
+        }
         if (this->header_parse_.data) {
             FLAC_FREE(this->header_parse_.data);
             this->header_parse_.data = nullptr;
-            this->header_parse_.data_capacity = 0;
         }
 
         // Accumulate 'fLaC' magic bytes (streaming-safe).
@@ -571,7 +597,8 @@ FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_
             size_t size_index = (this->header_parse_.type < METADATA_SIZE_LIMITS_COUNT - 1)
                                     ? this->header_parse_.type
                                     : METADATA_SIZE_LIMITS_COUNT - 1;
-            uint32_t max_size = this->max_metadata_sizes_[size_index];
+            uint32_t max_size =
+                this->max_metadata_sizes_ ? this->max_metadata_sizes_[size_index] : 0;
 
             if (this->header_parse_.length > max_size) {
                 should_skip = true;
@@ -625,7 +652,6 @@ FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_
                     bytes_consumed = pos;
                     return FLAC_DECODER_ERROR_MEMORY_ALLOCATION;
                 }
-                this->header_parse_.data_capacity = this->header_parse_.length;
             }
 
             uint32_t bytes_to_read =
@@ -640,15 +666,17 @@ FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_
             this->header_parse_.bytes_read += bytes_to_read;
 
             if (this->header_parse_.bytes_read == this->header_parse_.length) {
+                if (!this->metadata_blocks_) {
+                    this->metadata_blocks_ = std::make_unique<std::vector<FLACMetadataBlock>>();
+                }
                 // Grow vector before transferring ownership so that if emplace_back
                 // fails, header_parse_ still owns the data and its destructor cleans up.
-                this->metadata_blocks_.emplace_back();
-                auto& block = this->metadata_blocks_.back();
+                this->metadata_blocks_->emplace_back();
+                auto& block = this->metadata_blocks_->back();
                 block.type = static_cast<FLACMetadataType>(this->header_parse_.type);
                 block.length = this->header_parse_.length;
                 block.data = this->header_parse_.data;  // Transfer ownership
                 this->header_parse_.data = nullptr;
-                this->header_parse_.data_capacity = 0;
 
                 this->header_parse_.length = 0;
                 this->header_parse_.bytes_read = 0;
@@ -1052,7 +1080,10 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
                     this->subframe_.sample_idx = 0;
                 }
 
-                // Handle wasted bits: each read_uint(1) is atomic
+                // Handle wasted bits: each read_uint(1) is atomic.
+                // Bound `shift` inside the loop so pathological input (an unbounded run
+                // of zero bits) is rejected immediately rather than wasting CPU until the
+                // post-loop validator below fires; verified zero-cost on ESP32-S3.
                 if (this->subframe_.shift >= 1) {
                     while (true) {
                         uint32_t bit = this->read_uint(1);
@@ -1062,6 +1093,9 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
                         }
                         if (bit == 1) {
                             break;
+                        }
+                        if (FLAC_UNLIKELY(this->subframe_.shift >= bits_per_sample)) {
+                            return FLAC_DECODER_ERROR_BAD_SAMPLE_DEPTH;
                         }
                         this->subframe_.shift++;
                     }
@@ -1196,7 +1230,8 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
                         this->lpc_.coef_idx = i;
                         return FLAC_DECODER_NEED_MORE_DATA;
                     }
-                    this->lpc_.coefs[this->lpc_.order - i - 1] = coef;
+                    // coef value range [-16384, 16383] (precision <= 15 bits) fits int16_t.
+                    this->lpc_.coefs[this->lpc_.order - i - 1] = static_cast<int16_t>(coef);
                 }
 
                 this->residual_.out_ptr_offset = this->lpc_.order;
@@ -1214,7 +1249,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
                     return result;
                 }
 
-                const int32_t* coefs = nullptr;
+                const int16_t* coefs = nullptr;
                 int32_t shift = 0;
                 if (this->subframe_.type >= 8 && this->subframe_.type <= SUBFRAME_FIXED_MAX) {
                     coefs = FIXED_COEFFICIENTS[this->lpc_.order];
@@ -1596,13 +1631,12 @@ void FLACDecoder::free_buffers() {
 #endif
 
     // Clear metadata blocks (destructors free each block's data via FLAC_FREE)
-    this->metadata_blocks_.clear();
+    this->metadata_blocks_.reset();
 
     // Free header parse buffer
     if (this->header_parse_.data) {
         FLAC_FREE(this->header_parse_.data);
         this->header_parse_.data = nullptr;
-        this->header_parse_.data_capacity = 0;
     }
 }
 

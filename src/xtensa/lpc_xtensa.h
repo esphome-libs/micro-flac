@@ -62,7 +62,8 @@ extern "C" {
 /// @param buffer Pointer to sub_frame_buffer (int32_t*) - contains warm-up samples followed by
 /// residuals
 /// @param num_samples Total number of samples in the buffer
-/// @param coefficients Pointer to LPC coefficients array (int32_t*)
+/// @param coefficients Pointer to LPC coefficients array (int16_t*; loaded via l16si which
+///                     sign-extends transparently into a 32-bit register for mull)
 /// @param order Number of coefficients (predictor order)
 /// @param shift Shift amount for the prediction
 ///
@@ -70,7 +71,7 @@ extern "C" {
 ///       restored sample values.
 /// @note Optimized for orders 1-12 with fully unrolled loops; uses a generic
 ///       loop for higher orders.
-void restore_lpc_32bit_asm(int32_t* buffer, size_t num_samples, const int32_t* coefficients,
+void restore_lpc_32bit_asm(int32_t* buffer, size_t num_samples, const int16_t* coefficients,
                            uint32_t order, int32_t shift);
 
 /// @brief Optimized 64-bit assembly implementation of linear prediction restoration for FLAC
@@ -91,7 +92,7 @@ void restore_lpc_32bit_asm(int32_t* buffer, size_t num_samples, const int32_t* c
 ///       restored sample values.
 /// @note Optimized for orders 1-12 with fully unrolled loops; uses a generic
 ///       loop for higher orders.
-void restore_lpc_64bit_asm(int32_t* buffer, size_t num_samples, const int32_t* coefficients,
+void restore_lpc_64bit_asm(int32_t* buffer, size_t num_samples, const int16_t* coefficients,
                            uint32_t order, int32_t shift);
 
 #endif  // FLAC_LPC_XTENSA_ENABLED

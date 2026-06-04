@@ -336,9 +336,7 @@ public:
 
     /// @brief Get all decoded metadata blocks
     /// @return Vector of all metadata blocks parsed from the file
-    const std::vector<FLACMetadataBlock>& get_metadata_blocks() const {
-        return this->metadata_blocks_;
-    }
+    const std::vector<FLACMetadataBlock>& get_metadata_blocks() const;
 
     /// @brief Get the first metadata block matching a given type
     ///
@@ -347,14 +345,7 @@ public:
     ///
     /// @param type The metadata type to find (e.g., FLAC_METADATA_TYPE_PICTURE for album art)
     /// @return Pointer to the first matching metadata block, or nullptr if not found
-    const FLACMetadataBlock* get_metadata_block(FLACMetadataType type) const {
-        for (const auto& block : this->metadata_blocks_) {
-            if (block.type == type) {
-                return &block;
-            }
-        }
-        return nullptr;
-    }
+    const FLACMetadataBlock* get_metadata_block(FLACMetadataType type) const;
 
     // ========================================
     // Configuration
@@ -432,11 +423,10 @@ private:
 
     struct HeaderParseState {
         uint8_t* data{nullptr};         // Accumulated data for current block (FLAC_MALLOC'd)
-        uint32_t data_capacity{0};      // Allocated size of data buffer
-        uint32_t type{0};               // Type of current metadata block being read
         uint32_t length{0};             // Total length of current metadata block
         uint32_t bytes_read{0};         // Bytes read so far for current block
         uint8_t block_header_buf[4]{};  // Accumulator for partial metadata block headers
+        uint8_t type{0};                // Type of current metadata block being read
         uint8_t block_header_len{0};    // Bytes accumulated in block_header_buf (0-4)
         bool in_progress{false};        // In middle of reading header
         bool last_block{false};         // Current metadata block is the last one
@@ -470,8 +460,13 @@ private:
         bool wasted_pending{false};  // Resuming mid-wasted-bits-loop
     };
 
+    // LPC coefficient *values* fit in int16_t: FLAC spec bounds coefficient precision to
+    // <= 15 bits (RFC 9639 §9.2.6), so values are in [-16384, 16383]. Storing them as
+    // int16_t halves this array from 128 bytes to 64 bytes per decoder instance. The
+    // Xtensa LPC assembly loads coefs via `l16si` (sign-extends to 32-bit transparently);
+    // C++ fallbacks rely on implicit int16_t -> int32_t promotion in the multiply step.
     struct LpcState {
-        int32_t coefs[32]{};    // LPC coefficients
+        int16_t coefs[32]{};    // LPC coefficients (precision <= 15 bits => fits int16_t)
         uint32_t order{0};      // Prediction order
         uint32_t precision{0};  // Coefficient precision
         int32_t shift{0};       // Quantization shift
@@ -668,13 +663,15 @@ private:
 #endif
 
     // Metadata storage
-    std::vector<FLACMetadataBlock> metadata_blocks_;
+    std::unique_ptr<std::vector<FLACMetadataBlock>> metadata_blocks_;
 
     // Maximum size limits for each metadata type, indexed by FLACMetadataType enum value (0-6)
     // Index 7 is used for unknown/other types (types > 6)
-    static constexpr size_t METADATA_SIZE_LIMITS_COUNT = 8;      // Types 0-6 plus unknown (index 7)
-    uint32_t max_metadata_sizes_[METADATA_SIZE_LIMITS_COUNT]{};  // Maximum size limits for each
-                                                                 // metadata type
+    static constexpr size_t METADATA_SIZE_LIMITS_COUNT = 8;  // Types 0-6 plus unknown (index 7)
+    // Lazily allocated on first set_max_metadata_size() call. A default-constructed decoder
+    // stores no metadata (all size limits start at zero), so keeping this off the decoder
+    // object saves 28 bytes per instance unless the feature is opted into.
+    uint32_t* max_metadata_sizes_{nullptr};
 
     // Header parsing state
     HeaderParseState header_parse_{};
