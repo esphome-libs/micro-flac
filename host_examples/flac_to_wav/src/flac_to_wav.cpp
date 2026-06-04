@@ -74,7 +74,6 @@ void pack_samples_for_md5(const uint8_t* padded_samples, uint8_t* packed_output,
             sample |= extension_mask;
         }
 
-        // Write back in little-endian
         for (uint32_t byte = 0; byte < bytes_per_padded_sample; byte++) {
             output_ptr[byte] = static_cast<uint8_t>((sample >> (byte * 8)) & 0xFF);
         }
@@ -186,7 +185,6 @@ void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_channels,
     uint32_t data_chunk_size = 8 + data_chunk.data_size;      // "data" + size + data
     header.file_size = 4 + fmt_chunk_size + data_chunk_size;  // "WAVE" + chunks
 
-    // Write header
     std::fwrite(&header, sizeof(header), 1, file);
     if (use_extensible) {
         std::fwrite(&ext_header, sizeof(ext_header), 1, file);
@@ -315,7 +313,6 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
         return 1;
     }
 
-    // Initialize FLAC decoder
     FLACDecoder decoder;
     decoder.set_crc_check_enabled(true);
 
@@ -480,7 +477,6 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                         std::printf("    - Type %u, size: %u bytes\n", block.type, block.length);
                     }
 
-                    // Check MD5 signature
                     md5_all_zero = true;
                     for (unsigned char i : md5_sig) {
                         if (i != 0) {
