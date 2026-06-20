@@ -219,8 +219,7 @@ FLACDecoderResult FLACDecoder::decode_impl(const uint8_t* input, size_t input_le
     bytes_consumed = 0;
     samples_decoded = 0;
 
-    // Reject a null input pointer when bytes are claimed; a null/zero-length call is a valid no-op
-    if (input == nullptr && input_len > 0) {
+    if (input == nullptr) {
         return FLAC_DECODER_ERROR_INVALID_ARGUMENT;
     }
 
