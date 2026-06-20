@@ -145,9 +145,9 @@ Useful flags: `-max_total_time=60`, `-jobs=4`, `-workers=4`,
 
 ## UBSan
 
-The build keeps ASan and **all of UBSan** on (`-fsanitize=address,undefined
--fno-sanitize-recover=all`), including the `shift` and bounds checks that catch
-real bitstream bugs. The FLAC decoder is written to be UBSan-clean under fuzzing:
+The build keeps ASan and all of UBSan on (`-fsanitize=address,undefined -fno-sanitize-recover=all`),
+including the `shift` and bounds checks that catch real bitstream bugs. The FLAC decoder is written
+to be UBSan-clean under fuzzing:
 
 - Channel decorrelation and PCM packing route every wrap through `uint32_t`
   helpers (`src/wrapping_arithmetic.h`), so they never trip
