@@ -7,10 +7,21 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: every job here only reads the repo (checkout, build, test, cache). Jobs that
+# need more should add a narrower job-level permissions block rather than widening this default.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # New commits supersede an in-progress run on the same ref instead of running both to completion.
+  cancel-in-progress: true
+
 jobs:
   pre-commit:
     name: Pre-commit checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -23,6 +34,7 @@ jobs:
   lint:
     name: Static analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -42,6 +54,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -65,6 +78,7 @@ jobs:
   test:
     name: "Test: ${{ matrix.name }}"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: build
     strategy:
       fail-fast: false
@@ -124,6 +138,7 @@ jobs:
   platformio:
     name: PlatformIO Build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         include:
@@ -163,3 +178,28 @@ jobs:
             echo "Building environment: $env"
             pio run -d examples/${{ matrix.example }} -e "$env"
           done
+
+  # Single aggregating status for branch protection: require only "CI success" instead of every job.
+  # always() so it reports even when a job fails; skipped dependencies are treated as passing (only
+  # failure/cancelled blocks). New jobs added above are covered once listed under needs.
+  ci-success:
+    name: CI success
+    if: always()
+    needs:
+      - pre-commit
+      - lint
+      - build
+      - test
+      - platformio
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "One or more CI jobs failed or were cancelled:"
+          echo '${{ toJSON(needs) }}'
+          exit 1
+
+      - name: Report success
+        run: echo "All required CI jobs passed (skipped jobs are allowed)."
