@@ -219,6 +219,10 @@ FLACDecoderResult FLACDecoder::decode_impl(const uint8_t* input, size_t input_le
     bytes_consumed = 0;
     samples_decoded = 0;
 
+    if (input == nullptr) {
+        return FLAC_DECODER_ERROR_INVALID_ARGUMENT;
+    }
+
     if (this->decode_phase_ == DecodePhase::DONE) {
         return FLAC_DECODER_END_OF_STREAM;
     }
@@ -257,6 +261,17 @@ FLACDecoderResult FLACDecoder::decode_impl(const uint8_t* input, size_t input_le
         // Fall through: remaining bytes after detection go to header parsing
     }
 
+    // Validate the output buffer at the API boundary, before delegating, so the Ogg demuxer
+    // never pulls a packet it can't output: null is a caller error, undersized a sizing error.
+    if (this->decode_phase_ == DecodePhase::AUDIO) {
+        if (output == nullptr) {
+            return FLAC_DECODER_ERROR_INVALID_ARGUMENT;
+        }
+        if (output_size < this->get_output_buffer_size_bytes(output_32bit)) {
+            return FLAC_DECODER_ERROR_OUTPUT_TOO_SMALL;
+        }
+    }
+
     // Delegate to container-specific handler
     const uint8_t* remaining_input = input + bytes_consumed;
     size_t remaining_len = input_len - bytes_consumed;
@@ -265,13 +280,13 @@ FLACDecoderResult FLACDecoder::decode_impl(const uint8_t* input, size_t input_le
     FLACDecoderResult result = FLAC_DECODER_ERROR_INTERNAL;
 #ifndef MICRO_FLAC_DISABLE_OGG
     if (this->container_type_ == ContainerType::OGG_FLAC) {
-        result = this->decode_ogg(remaining_input, remaining_len, output, output_size,
-                                  delegate_consumed, samples_decoded, output_32bit);
+        result = this->decode_ogg(remaining_input, remaining_len, output, delegate_consumed,
+                                  samples_decoded, output_32bit);
     } else
 #endif
     {
-        result = this->decode_native(remaining_input, remaining_len, output, output_size,
-                                     delegate_consumed, samples_decoded, output_32bit);
+        result = this->decode_native(remaining_input, remaining_len, output, delegate_consumed,
+                                     samples_decoded, output_32bit);
     }
     bytes_consumed += delegate_consumed;
     return result;
@@ -327,9 +342,8 @@ const FLACMetadataBlock* FLACDecoder::get_metadata_block(FLACMetadataType type) 
 // ============================================================================
 
 FLACDecoderResult FLACDecoder::decode_native(const uint8_t* input, size_t input_len,
-                                             uint8_t* output, size_t output_size,
-                                             size_t& bytes_consumed, size_t& samples_decoded,
-                                             bool output_32bit) {
+                                             uint8_t* output, size_t& bytes_consumed,
+                                             size_t& samples_decoded, bool output_32bit) {
     bytes_consumed = 0;
     samples_decoded = 0;
 
@@ -378,9 +392,7 @@ FLACDecoderResult FLACDecoder::decode_native(const uint8_t* input, size_t input_
     }
 
     if (this->decode_phase_ == DecodePhase::AUDIO) {
-        if (!output || output_size < this->get_output_buffer_size_bytes(output_32bit)) {
-            return FLAC_DECODER_ERROR_OUTPUT_TOO_SMALL;
-        }
+        // Output buffer is validated at the API boundary (decode_impl) before delegation.
         uint32_t num_samples = 0;
         auto result = this->decode_frame(input, input_len, output, &num_samples, output_32bit);
         bytes_consumed = this->get_bytes_index();
@@ -405,8 +417,8 @@ FLACDecoderResult FLACDecoder::decode_native(const uint8_t* input, size_t input_
 
 #ifndef MICRO_FLAC_DISABLE_OGG
 FLACDecoderResult FLACDecoder::decode_ogg(const uint8_t* input, size_t input_len, uint8_t* output,
-                                          size_t output_size, size_t& bytes_consumed,
-                                          size_t& samples_decoded, bool output_32bit) {
+                                          size_t& bytes_consumed, size_t& samples_decoded,
+                                          bool output_32bit) {
     bytes_consumed = 0;
     samples_decoded = 0;
 
@@ -488,8 +500,8 @@ FLACDecoderResult FLACDecoder::decode_ogg(const uint8_t* input, size_t input_len
         // Step 3: Delegate body bytes to decode_native for header/frame decoding
         size_t native_consumed = 0;
         size_t native_samples = 0;
-        auto result = this->decode_native(body, body_len, output, output_size, native_consumed,
-                                          native_samples, output_32bit);
+        auto result = this->decode_native(body, body_len, output, native_consumed, native_samples,
+                                          output_32bit);
         samples_decoded = native_samples;
 
         // The demuxer assumes all offered data is consumed (it auto-advances).

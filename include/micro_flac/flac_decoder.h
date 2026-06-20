@@ -79,6 +79,7 @@ enum FLACDecoderResult : int8_t {
     FLAC_DECODER_ERROR_FRAME_MISMATCH = -18,
     FLAC_DECODER_ERROR_INTERNAL = -19,
     FLAC_DECODER_ERROR_BAD_RICE_PARTITION = -20,
+    FLAC_DECODER_ERROR_INVALID_ARGUMENT = -21,  // Caller passed a null/invalid pointer argument
 };
 
 /// @brief FLAC metadata block types as defined in the FLAC specification
@@ -261,7 +262,7 @@ public:
     /// Output samples use the stream's native byte packing (e.g., 2 bytes for 16-bit,
     /// 3 bytes for 24-bit). Use the int32_t* overload for uniform 32-bit output.
     ///
-    /// @param input Pointer to input data buffer
+    /// @param input Pointer to input data buffer (must not be null)
     /// @param input_len Number of bytes available in input buffer
     /// @param output Pointer to output buffer for PCM samples (may be nullptr before HEADER_READY)
     /// @param output_size_bytes Size of the output buffer in bytes
@@ -293,7 +294,7 @@ public:
     /// audio is shifted left by 8 bits, 16-bit by 16 bits, etc. This simplifies
     /// downstream processing on embedded devices by providing a uniform sample format.
     ///
-    /// @param input Pointer to input data buffer
+    /// @param input Pointer to input data buffer (must not be null)
     /// @param input_len Number of bytes available in input buffer
     /// @param output Pointer to int32_t output buffer (may be nullptr before HEADER_READY)
     /// @param output_size_samples Size of the output buffer in samples (number of int32_t elements,
@@ -504,14 +505,14 @@ private:
 
     /// @brief Native FLAC decode path
     FLACDecoderResult decode_native(const uint8_t* input, size_t input_len, uint8_t* output,
-                                    size_t output_size, size_t& bytes_consumed,
-                                    size_t& samples_decoded, bool output_32bit);
+                                    size_t& bytes_consumed, size_t& samples_decoded,
+                                    bool output_32bit);
 
 #ifndef MICRO_FLAC_DISABLE_OGG
     /// @brief Ogg FLAC decode path
     FLACDecoderResult decode_ogg(const uint8_t* input, size_t input_len, uint8_t* output,
-                                 size_t output_size, size_t& bytes_consumed,
-                                 size_t& samples_decoded, bool output_32bit);
+                                 size_t& bytes_consumed, size_t& samples_decoded,
+                                 bool output_32bit);
 #endif
 
     FLACDecoderResult read_header(const uint8_t* buffer, size_t buffer_length,

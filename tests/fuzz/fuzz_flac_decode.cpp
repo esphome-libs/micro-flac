@@ -567,9 +567,9 @@ int main(int argc, char** argv) {
 
     // Direct decode() calls covering a guard path the streaming loop avoids: a
     // zero-size output buffer after HEADER_READY (the loop always supplies a
-    // full-frame buffer). The input pointer is always valid and non-null here --
-    // decode() does not promise to guard a null input, so the harness never hands
-    // it one (libFuzzer always passes a valid payload pointer).
+    // full-frame buffer). The null pointers below are *output* buffers passed
+    // during header parsing, where output is legitimately unused; the input
+    // pointer is always a valid libFuzzer payload.
     {
         std::vector<uint8_t> hdr = make_flac_header(44100, 2, 16, 4096, 4096);
         FLACDecoder decoder;
