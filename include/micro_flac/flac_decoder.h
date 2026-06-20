@@ -79,6 +79,7 @@ enum FLACDecoderResult : int8_t {
     FLAC_DECODER_ERROR_FRAME_MISMATCH = -18,
     FLAC_DECODER_ERROR_INTERNAL = -19,
     FLAC_DECODER_ERROR_BAD_RICE_PARTITION = -20,
+    FLAC_DECODER_ERROR_INVALID_ARGUMENT = -21,  // Caller passed a null/invalid pointer argument
 };
 
 /// @brief FLAC metadata block types as defined in the FLAC specification
@@ -504,14 +505,14 @@ private:
 
     /// @brief Native FLAC decode path
     FLACDecoderResult decode_native(const uint8_t* input, size_t input_len, uint8_t* output,
-                                    size_t output_size, size_t& bytes_consumed,
-                                    size_t& samples_decoded, bool output_32bit);
+                                    size_t& bytes_consumed, size_t& samples_decoded,
+                                    bool output_32bit);
 
 #ifndef MICRO_FLAC_DISABLE_OGG
     /// @brief Ogg FLAC decode path
     FLACDecoderResult decode_ogg(const uint8_t* input, size_t input_len, uint8_t* output,
-                                 size_t output_size, size_t& bytes_consumed,
-                                 size_t& samples_decoded, bool output_32bit);
+                                 size_t& bytes_consumed, size_t& samples_decoded,
+                                 bool output_32bit);
 #endif
 
     FLACDecoderResult read_header(const uint8_t* buffer, size_t buffer_length,
