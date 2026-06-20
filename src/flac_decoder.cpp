@@ -820,6 +820,9 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_header_phase(const uint8_t*
     // Sync validation: quick-reject before computing target length
     // NOLINTNEXTLINE(readability-magic-numbers)
     if (this->frame_.header_buffer[0] != 0xFF || (this->frame_.header_buffer[1] & 0xFE) != 0xF8) {
+        // decode_native returns buffer_index_ as bytes_consumed; record this call's
+        // consumed count so a stale value can't exceed buffer_length on error.
+        this->buffer_index_ = buf_offset;
         if (this->frame_.header_buffer_len <= 1 && buf_offset >= buffer_length) {
             this->reset_frame_state();
             return FLAC_DECODER_END_OF_STREAM;
@@ -832,6 +835,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_header_phase(const uint8_t*
     uint8_t target = compute_frame_header_length(this->frame_.header_buffer);
     if (target < FRAME_HEADER_MIN_LENGTH) {
         // Minimum valid frame header is 6 bytes; 0 indicates an invalid UTF-8 coded number
+        this->buffer_index_ = buf_offset;  // this call's consumed count
         this->reset_frame_state();
         return FLAC_DECODER_ERROR_BAD_HEADER;
     }
@@ -849,6 +853,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_header_phase(const uint8_t*
                            this->stream_info_, this->enable_crc_check_, header_info);
 
     if (ret != FLAC_DECODER_SUCCESS) {
+        this->buffer_index_ = buf_offset;  // this call's consumed count
         this->reset_frame_state();
         return ret;
     }
@@ -858,6 +863,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_header_phase(const uint8_t*
     this->curr_frame_bits_per_sample_ = header_info.bits_per_sample;
 
     if (this->curr_frame_block_size_ > this->stream_info_.max_block_size()) {
+        this->buffer_index_ = buf_offset;  // this call's consumed count
         this->reset_frame_state();
         return FLAC_DECODER_ERROR_BAD_BLOCK_SIZE;
     }
