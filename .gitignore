@@ -111,3 +111,16 @@ htmlcov/
 
 # Fuzzing
 corpus/
+tests/fuzz/build-libfuzzer/
+tests/fuzz/build-standalone/
+tests/fuzz/build-cov/
+tests/fuzz/seeds_flac/
+tests/fuzz/corpus_flac/
+tests/fuzz/cov-html/
+tests/fuzz/cov.profraw
+tests/fuzz/cov.profdata
+tests/fuzz/crash-*
+tests/fuzz/leak-*
+tests/fuzz/timeout-*
+tests/fuzz/oom-*
+crash-*

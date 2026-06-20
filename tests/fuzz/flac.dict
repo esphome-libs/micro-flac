@@ -1,0 +1,51 @@
+# libFuzzer dictionary for FLAC fuzzing.
+# Format: one token per line, quoted C-escaped string.
+#
+# Tokens steer libFuzzer toward the structural markers the decoder branches on:
+# the two container magics, the FLAC-in-Ogg mapping header, frame sync codes, and
+# the metadata-block headers (last-block flag | block type, then the 3-byte
+# length) that gate header parsing.
+
+# Container magics (first 4 bytes drive auto-detection)
+"fLaC"
+"OggS"
+
+# FLAC-in-Ogg mapping: the first Ogg packet is 0x7F + "FLAC" + version + header.
+"\x7FFLAC"
+
+# Frame sync: 14-bit sync code 0b11111111111110 followed by the blocking-strategy
+# bit (0 fixed-blocksize, 1 variable-blocksize).
+"\xFF\xF8"
+"\xFF\xF9"
+
+# Metadata block headers: (last-block flag 0x80 | 7-bit block type) then a 24-bit
+# big-endian length. STREAMINFO is type 0 and always 34 bytes.
+# STREAMINFO, non-last and last, length 34 (0x22):
+"\x00\x00\x00\x22"
+"\x80\x00\x00\x22"
+
+# Block-type bytes (non-last | last): STREAMINFO 0, PADDING 1, APPLICATION 2,
+# SEEKTABLE 3, VORBIS_COMMENT 4, CUESHEET 5, PICTURE 6.
+"\x01"
+"\x02"
+"\x03"
+"\x04"
+"\x05"
+"\x06"
+"\x81"
+"\x84"
+"\x86"
+
+# Vorbis-comment vendor string the reference encoder writes; seeds the comment
+# parse path.
+"reference libFLAC"
+
+# PICTURE block MIME type marker (drives the picture-block parse).
+"image/"
+
+# Common sample rates as 20-bit big-endian values, byte-aligned at a STREAMINFO
+# offset (sample_rate occupies bits, but these byte runs still anchor mutations):
+# 44100 = 0x0AC44, 48000 = 0x0BB80, 96000 = 0x17700.
+"\x0A\xC4\x40"
+"\x0B\xB8\x00"
+"\x17\x70\x00"
