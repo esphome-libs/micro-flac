@@ -401,8 +401,8 @@ std::vector<uint8_t> make_flac_header(uint32_t sample_rate, uint8_t channels, ui
     const uint8_t ch_field = static_cast<uint8_t>((channels - 1) & 0x07);
     const uint8_t bps_field = static_cast<uint8_t>((bits - 1) & 0x1F);
     s[12] = static_cast<uint8_t>(((sample_rate & 0x0F) << 4) | (ch_field << 1) | (bps_field >> 4));
-    s[13] = static_cast<uint8_t>((bps_field & 0x01)
-                                 << 4);  // low bps bit | total_samples high nibble (0)
+    s[13] = static_cast<uint8_t>((bps_field & 0x0F)
+                                 << 4);  // low 4 bps bits | total_samples high nibble (0)
     // s[13..17] total_samples remaining bytes 0 (unknown). s[18..33] MD5 0.
     v.insert(v.end(), s, s + 34);
     return v;
