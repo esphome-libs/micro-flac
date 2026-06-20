@@ -1,6 +1,7 @@
 # microFLAC - Embedded FLAC Decoder
 
 [![CI](https://github.com/esphome-libs/micro-flac/actions/workflows/ci.yml/badge.svg)](https://github.com/esphome-libs/micro-flac/actions/workflows/ci.yml)
+[![Component Registry](https://components.espressif.com/components/esphome/micro-flac/badge.svg)](https://components.espressif.com/components/esphome/micro-flac)
 
 A FLAC (Free Lossless Audio Codec) decoder optimized for ESP32 embedded devices. Supports both native FLAC and Ogg FLAC containers with automatic format detection. Designed as an ESP-IDF component with PSRAM support and Xtensa assembly optimizations for ESP32/ESP32-S3.
 
