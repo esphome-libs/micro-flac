@@ -33,6 +33,10 @@ uint8_t compute_frame_header_length(const uint8_t* header) {
         // Continuation bytes (0x80-0xBF) are invalid as a leading byte
         return 0;
     }
+    if (utf8_first == 0xFF) {  // NOLINT(readability-magic-numbers)
+        // 0xFF is not a legal leading byte (RFC 9639 Table 18 tops out at 0xFE)
+        return 0;
+    }
     if (utf8_first >= 0xC0) {  // NOLINT(readability-magic-numbers)
         uint8_t mask = utf8_first;
         utf8_len = 0;
@@ -40,8 +44,11 @@ uint8_t compute_frame_header_length(const uint8_t* header) {
             utf8_len++;
             mask = static_cast<uint8_t>(mask << 1);
         }
-        if (utf8_len > 7) {
-            utf8_len = 7;  // FLAC spec max is 7 bytes
+        // The 7-byte form (0xFE) encodes 36 bits, which only sample numbers use.
+        // Fixed-block-size streams (blocking strategy bit clear) carry a frame
+        // number capped at 31 bits = 6 encoded bytes (RFC 9639 Section 9.1.5).
+        if (utf8_len == 7 && (header[1] & 0x01) == 0) {
+            return 0;
         }
     }
 
@@ -140,6 +147,15 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
 
     // Index of extra fields: header_len - 1 (crc8) - sample_rate_extra - block_size_extra
     uint8_t extra_idx = static_cast<uint8_t>(header_len - 1 - sample_rate_extra - block_size_extra);
+
+    // The coded number's value is unused (no seeking), but its continuation bytes
+    // (header[5] through the byte before the extra fields) must still match the
+    // 10xxxxxx pattern (RFC 9639 Table 18) for the header to be well formed.
+    for (uint8_t i = 5; i < extra_idx; i++) {
+        if ((header[i] & 0xC0) != 0x80) {  // NOLINT(readability-magic-numbers)
+            return FLAC_DECODER_ERROR_BAD_HEADER;
+        }
+    }
 
     // 9.1.6 Uncommon block size
     if (block_size_code == 6) {

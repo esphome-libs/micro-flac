@@ -268,6 +268,22 @@ void test_crc_error_recovery(size_t chunk_size) {
            chunk_size);
 }
 
+void test_malformed_coded_number(CodedNumberVariant variant, const char* name) {
+    SyntheticStream stream = build_stream(variant);
+    DecodeRun run = run_decoder(stream.bytes, stream.bytes.size());
+
+    EXPECT(!run.invariant_violated, "bytes_consumed invariant violated (%s)", name);
+    EXPECT(!run.errors.empty(), "%s: malformed coded number was accepted", name);
+    if (!run.errors.empty()) {
+        EXPECT(run.errors[0] == micro_flac::FLAC_DECODER_ERROR_BAD_HEADER,
+               "%s: expected BAD_HEADER, got %d", name, static_cast<int>(run.errors[0]));
+    }
+    // The malformed frame must never surface as decoded audio.
+    for (int16_t value : run.frame_values) {
+        EXPECT(value != FRAME_VALUES[0], "%s: malformed frame was decoded", name);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -278,6 +294,10 @@ int main() {
     test_crc_error_recovery(SIZE_MAX);
     test_crc_error_recovery(7);
     test_crc_error_recovery(1);
+
+    test_malformed_coded_number(CodedNumberVariant::INVALID_LEAD_FF, "lead_0xFF");
+    test_malformed_coded_number(CodedNumberVariant::INVALID_CONTINUATION, "bad_continuation");
+    test_malformed_coded_number(CodedNumberVariant::SEVEN_BYTE_FORM, "7byte_in_fixed");
 
     if (g_failures == 0) {
         std::printf("All error-recovery regression tests passed\n");
