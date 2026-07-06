@@ -74,8 +74,13 @@ static bool can_use_lpc_32bit(uint32_t bits_per_sample, const int16_t* coefs, ui
     }
 
     // Residual (sample + prediction after shift) must fit in 32-bit signed
-    // Arithmetic right shift of negative value gives worst-case (ceiling) magnitude
+    // Arithmetic right shift of negative value gives worst-case (ceiling) magnitude.
+    // Right-shifting a negative signed value is implementation-defined rather than truly
+    // undefined, and every target this library builds for (GCC/Clang on Xtensa and host)
+    // sign-extends; `shift` is always >= 0 (FLAC LPC quantization shift), so only the
+    // left-hand side is negative here.
     uint64_t max_pred_after_shift =
+        // cppcheck-suppress shiftNegativeLHS
         static_cast<uint64_t>(-((-static_cast<int64_t>(max_pred_before_shift)) >> shift));
     return (max_abs_sample + max_pred_after_shift) <= INT32_MAX;
 }

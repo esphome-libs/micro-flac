@@ -315,6 +315,9 @@ void FLACDecoder::set_max_metadata_size(FLACMetadataType type, uint32_t max_size
     this->max_metadata_sizes_[index] = max_size;
 }
 
+// Public API accessor mirroring set_max_metadata_size(); no in-tree caller needs to read
+// the limit back, but library consumers do.
+// cppcheck-suppress unusedFunction
 uint32_t FLACDecoder::get_max_metadata_size(FLACMetadataType type) const {
     // Use array indexing for faster access (types 0-6 map directly, others use index 7)
     size_t index = (static_cast<size_t>(type) < METADATA_SIZE_LIMITS_COUNT - 1)
@@ -328,6 +331,10 @@ const std::vector<FLACMetadataBlock>& FLACDecoder::get_metadata_blocks() const {
     return this->metadata_blocks_ ? *this->metadata_blocks_ : EMPTY_METADATA_BLOCKS;
 }
 
+// Public API convenience accessor (single-match lookup by type) alongside
+// get_metadata_blocks(); no in-tree caller needs a single-type lookup, but library
+// consumers do (e.g. fetching FLAC_METADATA_TYPE_PICTURE).
+// cppcheck-suppress unusedFunction
 const FLACMetadataBlock* FLACDecoder::get_metadata_block(FLACMetadataType type) const {
     for (const auto& block : this->get_metadata_blocks()) {
         if (block.type == type) {
@@ -591,7 +598,7 @@ FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_
                 return FLAC_DECODER_NEED_MORE_DATA;
             }
 
-            uint8_t* bh = this->header_parse_.block_header_buf;
+            const uint8_t* bh = this->header_parse_.block_header_buf;
             this->header_parse_.last_block = (bh[0] & 0x80) != 0;
             this->header_parse_.type = bh[0] & 0x7F;  // NOLINT(readability-magic-numbers)
             this->header_parse_.length =
@@ -739,11 +746,10 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame(const uint8_t* buffer, size
         this->frame_.running_crc16 = 0;
     }
 
-    FLACDecoderResult ret = FLAC_DECODER_SUCCESS;
     size_t consumed = 0;
 
     if (this->frame_.stage == FrameDecodeStage::FRAME_HEADER) {
-        ret = this->decode_frame_header_phase(buffer, buffer_length);
+        FLACDecoderResult ret = this->decode_frame_header_phase(buffer, buffer_length);
         if (ret != FLAC_DECODER_SUCCESS) {
             return ret;
         }
@@ -755,7 +761,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame(const uint8_t* buffer, size
     size_t data_len = buffer_length - consumed;
 
     if (this->frame_.stage == FrameDecodeStage::SUBFRAME) {
-        ret = this->decode_frame_subframe_phase(data, data_len);
+        FLACDecoderResult ret = this->decode_frame_subframe_phase(data, data_len);
         if (ret == FLAC_DECODER_NEED_MORE_DATA) {
             this->buffer_index_ = buffer_length;
             return ret;
@@ -773,7 +779,7 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame(const uint8_t* buffer, size
     }
 
     if (this->frame_.stage == FrameDecodeStage::FRAME_FOOTER) {
-        ret = this->decode_frame_footer_phase(data, data_len);
+        FLACDecoderResult ret = this->decode_frame_footer_phase(data, data_len);
 
         if (ret == FLAC_DECODER_NEED_MORE_DATA) {
             this->buffer_index_ = buffer_length;
@@ -978,7 +984,6 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_footer_phase(const uint8_t*
 FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframes(uint32_t block_size,
                                                          uint32_t bits_per_sample,
                                                          uint32_t channel_assignment) {
-    FLACDecoderResult result = FLAC_DECODER_SUCCESS;
     bool resuming = this->frame_.resuming;
 
     // Compute per-channel sample depths
@@ -1027,11 +1032,10 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframes(uint32_t block_size,
 
     // Resume the interrupted channel if applicable
     if (resuming) {
-        if (wide_side && i == side_ch) {
-            result = this->decode_subframe_impl<int64_t>(block_size, depths[i], 0);
-        } else {
-            result = this->decode_subframe_impl<int32_t>(block_size, depths[i], offset);
-        }
+        FLACDecoderResult result =
+            wide_side && i == side_ch
+                ? this->decode_subframe_impl<int64_t>(block_size, depths[i], 0)
+                : this->decode_subframe_impl<int32_t>(block_size, depths[i], offset);
         if (result != FLAC_DECODER_SUCCESS) {
             this->frame_.channel_idx = static_cast<uint8_t>(i);
             this->frame_.block_samples_offset = offset;
@@ -1043,11 +1047,10 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframes(uint32_t block_size,
 
     // Continue with remaining channels
     for (; i < num_channels; i++) {
-        if (wide_side && i == side_ch) {
-            result = this->decode_subframe_impl<int64_t>(block_size, depths[i], 0);
-        } else {
-            result = this->decode_subframe_impl<int32_t>(block_size, depths[i], offset);
-        }
+        FLACDecoderResult result =
+            wide_side && i == side_ch
+                ? this->decode_subframe_impl<int64_t>(block_size, depths[i], 0)
+                : this->decode_subframe_impl<int32_t>(block_size, depths[i], offset);
         if (result != FLAC_DECODER_SUCCESS) {
             this->frame_.channel_idx = static_cast<uint8_t>(i);
             this->frame_.block_samples_offset = offset;

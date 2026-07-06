@@ -269,7 +269,6 @@ void write_samples(uint8_t* output_buffer, const int32_t* block_samples, uint32_
         }
     } else {
         // Native output mode: pack to nearest byte boundary
-        uint32_t bytes_per_sample = (bits_per_sample + 7) / 8;
         uint32_t shift_amount = 0;
         if (bits_per_sample % 8 != 0) {
             shift_amount = 8 - (bits_per_sample % 8);
@@ -284,6 +283,7 @@ void write_samples(uint8_t* output_buffer, const int32_t* block_samples, uint32_
         } else if (bits_per_sample == 24 && num_channels == 2) {
             write_samples_24bit_2ch(output_buffer, block_samples, block_size);
         } else {
+            uint32_t bytes_per_sample = (bits_per_sample + 7) / 8;
             write_samples_nch(output_buffer, block_samples, block_size, bytes_per_sample,
                               shift_amount, num_channels);
         }
