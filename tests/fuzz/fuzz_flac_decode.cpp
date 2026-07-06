@@ -594,8 +594,9 @@ int main(int argc, char** argv) {
             off += ate;
         }
         // Zero-size output buffer for a frame decode (no frames follow, but the
-        // guard still runs).
-        decoder.decode(hdr.data() + off, hdr.size() - off, &one_byte, 0, consumed, samples);
+        // guard still runs). Result intentionally unchecked: this call only exists to
+        // exercise the zero-capacity guard path, not to assert a particular outcome.
+        (void)decoder.decode(hdr.data() + off, hdr.size() - off, &one_byte, 0, consumed, samples);
     }
 
     // Random blobs with planted fLaC/OggS magics and frame sync codes.

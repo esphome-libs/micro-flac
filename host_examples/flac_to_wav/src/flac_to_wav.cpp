@@ -38,8 +38,8 @@ constexpr uint64_t PERCENTAGE_MULTIPLIER = 100;
 
 // Pack samples for MD5 computation according to FLAC spec
 // Samples should be sign-extended to the next whole byte in little-endian order
-void pack_samples_for_md5(const uint8_t* padded_samples, uint8_t* packed_output,
-                          uint32_t num_samples, uint32_t bits_per_sample) {
+static void pack_samples_for_md5(const uint8_t* padded_samples, uint8_t* packed_output,
+                                 uint32_t num_samples, uint32_t bits_per_sample) {
     uint32_t bytes_per_padded_sample = (bits_per_sample + 7) / 8;
     uint32_t shift_amount = (bits_per_sample % 8 != 0) ? (8 - (bits_per_sample % 8)) : 0;
 
@@ -59,7 +59,7 @@ void pack_samples_for_md5(const uint8_t* padded_samples, uint8_t* packed_output,
         // Read the padded sample (LSB-padded by decoder)
         int32_t sample = 0;
         for (uint32_t byte = 0; byte < bytes_per_padded_sample; byte++) {
-            sample |= ((int32_t)sample_ptr[byte]) << (byte * 8);
+            sample |= (static_cast<int32_t>(sample_ptr[byte])) << (byte * 8);
         }
 
         // Right-shift to remove padding
@@ -106,8 +106,8 @@ struct WAVDataChunk {
     uint32_t data_size;  // Data chunk size
 };
 
-void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_channels,
-                      uint16_t bits_per_sample, uint32_t num_samples) {
+static void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_channels,
+                             uint16_t bits_per_sample, uint32_t num_samples) {
     WAVHeader header{};
     WAVExtensibleHeader ext_header{};
     WAVDataChunk data_chunk{};
@@ -200,7 +200,7 @@ struct Args {
 };
 
 // Returns true on success, false on error (error messages already printed)
-bool parse_args(int argc, char* argv[], Args& args) {
+static bool parse_args(int argc, const char* const argv[], Args& args) {
     int arg_idx = 1;
     while (arg_idx < argc) {
         const char* arg = argv[arg_idx];
@@ -242,9 +242,9 @@ bool parse_args(int argc, char* argv[], Args& args) {
     return true;
 }
 
-void update_wav_header(const char* output_file, long header_end_pos,
-                       uint32_t samples_per_channel_decoded, uint32_t num_channels,
-                       uint32_t bytes_per_sample) {
+static void update_wav_header(const char* output_file, long header_end_pos,
+                              uint32_t samples_per_channel_decoded, uint32_t num_channels,
+                              uint32_t bytes_per_sample) {
     FILE* f = std::fopen(output_file, "r+b");
     if (f) {
         uint32_t data_size = samples_per_channel_decoded * num_channels * bytes_per_sample;
@@ -259,7 +259,7 @@ void update_wav_header(const char* output_file, long header_end_pos,
     }
 }
 
-void verify_md5(MD5& md5_ctx, const uint8_t (&md5_sig)[16], bool md5_all_zero) {
+static void verify_md5(MD5& md5_ctx, const uint8_t (&md5_sig)[16], bool md5_all_zero) {
     std::printf("\n=== MD5 Verification ===\n");
     if (md5_all_zero) {
         std::printf("Status: SKIPPED (no MD5 signature in file)\n");
@@ -390,10 +390,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
 
         if (total_samples > 0 &&
             samples_per_channel_decoded % (sample_rate * PROGRESS_UPDATE_INTERVAL_SECONDS) == 0) {
-            std::printf("  Decoded %u / %llu samples per channel (%llu%%)\n",
-                        samples_per_channel_decoded, (unsigned long long)total_samples,
-                        (unsigned long long)(static_cast<uint64_t>(samples_per_channel_decoded) *
-                                             PERCENTAGE_MULTIPLIER / total_samples));
+            std::printf(
+                "  Decoded %u / %llu samples per channel (%llu%%)\n", samples_per_channel_decoded,
+                static_cast<unsigned long long>(total_samples),
+                static_cast<unsigned long long>(static_cast<uint64_t>(samples_per_channel_decoded) *
+                                                PERCENTAGE_MULTIPLIER / total_samples));
         }
     };
 
@@ -461,7 +462,8 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                     std::printf("  Sample rate: %u Hz\n", sample_rate);
                     std::printf("  Channels: %u\n", num_channels);
                     std::printf("  Bits per sample: %u\n", bits_per_sample);
-                    std::printf("  Total samples: %llu\n", (unsigned long long)total_samples);
+                    std::printf("  Total samples: %llu\n",
+                                static_cast<unsigned long long>(total_samples));
                     std::printf("  Max block size: %u\n", stream_info.max_block_size());
 
                     std::memcpy(md5_sig, stream_info.md5_signature(), 16);

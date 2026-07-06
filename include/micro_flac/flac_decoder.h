@@ -25,6 +25,17 @@
 #include <memory>
 #include <vector>
 
+// Marks functions whose return value must not be ignored (the decoder reports
+// errors only through return codes). [[nodiscard]] needs C++17; the library
+// builds at C++14, so fall back to the GNU attribute there.
+#if defined(__cplusplus) && __cplusplus >= 201703L
+#define MICRO_FLAC_NODISCARD [[nodiscard]]
+#elif defined(__GNUC__)
+#define MICRO_FLAC_NODISCARD __attribute__((warn_unused_result))
+#else
+#define MICRO_FLAC_NODISCARD
+#endif
+
 #ifndef MICRO_FLAC_DISABLE_OGG
 namespace micro_ogg {
 class OggDemuxer;
@@ -283,6 +294,7 @@ public:
     ///       enters an error state and will return the same error code on every subsequent
     ///       call until reset() is called. To decode a different stream, always call
     ///       reset() first.
+    MICRO_FLAC_NODISCARD
     FLACDecoderResult decode(const uint8_t* input, size_t input_len, uint8_t* output,
                              size_t output_size_bytes, size_t& bytes_consumed,
                              size_t& samples_decoded);
@@ -302,6 +314,7 @@ public:
     /// @param bytes_consumed [out] Number of input bytes consumed by this call
     /// @param samples_decoded [out] Number of total interleaved samples decoded (all channels)
     /// @return Same result codes as the uint8_t* overload
+    MICRO_FLAC_NODISCARD
     FLACDecoderResult decode(const uint8_t* input, size_t input_len, int32_t* output,
                              size_t output_size_samples, size_t& bytes_consumed,
                              size_t& samples_decoded);
@@ -382,6 +395,9 @@ public:
 
     /// @brief Get current CRC checking state
     /// @return true if CRC checking is enabled, false otherwise
+    // Public API accessor mirroring set_crc_check_enabled(); no in-tree caller needs to
+    // read the flag back, but library consumers do.
+    // cppcheck-suppress unusedFunction
     bool is_crc_check_enabled() const {
         return this->enable_crc_check_;
     }

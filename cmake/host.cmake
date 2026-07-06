@@ -26,6 +26,14 @@ function(flac_configure_host TARGET SOURCE_DIR)
         -Wdouble-promotion
         -Wformat=2
         -Wimplicit-fallthrough
+        # Any function not declared in a header must be static; keeps
+        # -Wunused-function able to see dead internal functions. Clang and GCC
+        # spell the C++ variant of this check differently.
+        $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wmissing-prototypes>
+        $<$<CXX_COMPILER_ID:GNU>:-Wmissing-declarations>
+        # C++-only (guards against ever mixing in a C source): require
+        # static_cast/reinterpret_cast over C-style casts
+        $<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>
         $<$<BOOL:${ENABLE_WERROR}>:-Werror>
     )
 
