@@ -30,9 +30,11 @@
 #include "test_audio_flac_24bit.h"
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 using namespace micro_flac;

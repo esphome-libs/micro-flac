@@ -48,7 +48,7 @@
 #ifndef __ASSEMBLER__
 
 #include <cstddef>
-#include <cstdint>
+#include <cstdint>  // IWYU pragma: keep (used by declarations guarded to Xtensa builds)
 
 #ifdef __cplusplus
 extern "C" {

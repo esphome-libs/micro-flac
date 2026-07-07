@@ -15,7 +15,7 @@
 #include "lpc.h"
 
 #include "compiler.h"
-#include "xtensa/lpc_xtensa.h"
+#include "xtensa/lpc_xtensa.h"  // IWYU pragma: keep (contents only visible on Xtensa builds)
 
 #include <cstdint>
 #include <cstdlib>
