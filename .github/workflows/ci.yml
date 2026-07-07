@@ -6,6 +6,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual "Run workflow" from the Actions tab.
+  workflow_dispatch:
 
 # Least privilege: every job here only reads the repo (checkout, build, test, cache). Jobs that
 # need more should add a narrower job-level permissions block rather than widening this default.
@@ -179,6 +181,39 @@ jobs:
       - name: Run tests
         run: python3 host_examples/flac_to_wav/test_flac_decoder.py --categories subset --build-dir build ${{ matrix.args }}
 
+  fuzz:
+    name: Fuzz build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      # Standalone harness (no libFuzzer runtime needed) under ASan/UBSan.
+      # Guards against harness compile/link regressions and gives the tree a
+      # clang build; deep corpus fuzzing stays a local task (see tests/fuzz).
+      - name: Configure fuzz harness (standalone)
+        run: cmake -B tests/fuzz/build -DFUZZ_USE_LIBFUZZER=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ tests/fuzz
+
+      - name: Build fuzz harness
+        run: cmake --build tests/fuzz/build
+
+      - name: Run standalone torture battery
+        env:
+          FUZZ_ITERATIONS: '500'
+          ASAN_OPTIONS: abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ./tests/fuzz/build/fuzz_flac_decode
+
   platformio:
     name: PlatformIO Build
     runs-on: ubuntu-latest
@@ -236,6 +271,7 @@ jobs:
       - cppcheck
       - build
       - test
+      - fuzz
       - platformio
     runs-on: ubuntu-latest
     timeout-minutes: 5
