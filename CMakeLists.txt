@@ -87,7 +87,7 @@ if(ESP_IDF_BUILD)
 # ==============================================================================
 
 else()
-    project(micro_flac VERSION 0.3.0 LANGUAGES CXX)
+    project(micro_flac VERSION 0.2.1 LANGUAGES CXX)
 
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/host.cmake)
 
