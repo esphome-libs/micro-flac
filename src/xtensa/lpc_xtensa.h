@@ -47,7 +47,7 @@
 // C/C++ declarations - not visible to the assembler
 #ifndef __ASSEMBLER__
 
-#include <cstddef>
+#include <cstddef>  // IWYU pragma: keep (used by declarations guarded to Xtensa builds)
 #include <cstdint>  // IWYU pragma: keep (used by declarations guarded to Xtensa builds)
 
 #ifdef __cplusplus
