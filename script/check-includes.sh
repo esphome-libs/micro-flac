@@ -4,8 +4,9 @@
 #
 # Verifies every source/header directly includes what it uses, with one
 # relaxation: a foo.cpp may rely on headers its matching foo.h already
-# includes. ESP-IDF branches are checked too, using the stub headers in
-# script/esp_stubs/ -- see script/check_includes.py for the full design.
+# includes. ESP-IDF branches are checked too, using stub headers
+# materialized from script/esp_stubs.py. See script/check_includes.py
+# for the full design.
 #
 # Usage: ./script/check-includes.sh [--fix]
 
