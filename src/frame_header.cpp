@@ -201,9 +201,8 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
     }
 
     // 9.1.8 Frame header CRC
-    uint8_t crc_read = header[header_len - 1];
-
     if (crc_check) {
+        uint8_t crc_read = header[header_len - 1];
         uint8_t crc_calculated = calculate_crc8(header, header_len - 1);
         if (crc_calculated != crc_read) {
             return FLAC_DECODER_ERROR_CRC_MISMATCH;

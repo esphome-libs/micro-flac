@@ -30,9 +30,11 @@
 #include "test_audio_flac_24bit.h"
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 using namespace micro_flac;
@@ -72,7 +74,7 @@ static void print_stream_info(const BenchmarkStats& stats) {
     printf("\n");
 }
 
-static void print_benchmark_results(BenchmarkStats& stats) {
+static void print_benchmark_results(const BenchmarkStats& stats) {
     printf("\n--- %s ---\n", stats.label);
     printf("Frames decoded: %lu\n", (unsigned long)stats.frame_count);
     printf("Total decode time: %.2f ms\n", stats.total_time_us / 1000.0);
@@ -161,7 +163,8 @@ static BenchmarkStats run_decode_pass(const uint8_t* data, size_t data_len, cons
             // Allocate output buffer
             output_buffer_samples = decoder.get_output_buffer_size_samples();
             if (output_32bit) {
-                output_buffer_32 = (int32_t*)malloc(output_buffer_samples * sizeof(int32_t));
+                output_buffer_32 =
+                    static_cast<int32_t*>(malloc(output_buffer_samples * sizeof(int32_t)));
                 if (!output_buffer_32) {
                     printf("ERROR: Failed to allocate output buffer\n");
                     return stats;
@@ -169,7 +172,7 @@ static BenchmarkStats run_decode_pass(const uint8_t* data, size_t data_len, cons
             } else {
                 uint32_t bytes_per_sample = stream_info.bytes_per_sample();
                 output_buffer_size = output_buffer_samples * bytes_per_sample;
-                output_buffer = (uint8_t*)malloc(output_buffer_size);
+                output_buffer = static_cast<uint8_t*>(malloc(output_buffer_size));
                 if (!output_buffer) {
                     printf("ERROR: Failed to allocate output buffer\n");
                     return stats;

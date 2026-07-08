@@ -174,10 +174,16 @@ static void run_decode_pass(FLACDecoder& decoder, const std::vector<uint8_t>& pa
             const uint32_t bps = info.bits_per_sample();
             const uint32_t bytes_ps = info.bytes_per_sample();
             // FLAC bounds: 1..8 channels, 1..32 bits/sample (=> 1..4 bytes), and a
-            // positive sample rate (is_valid() already implies the last).
+            // positive sample rate (is_valid() already implies the last). These bounds
+            // currently follow unconditionally from num_channels()/bits_per_sample()'s
+            // fixed-width bitfield decoding (cppcheck flags them as always-true), but the
+            // check stays as a regression guard: it is the oracle that would catch a
+            // future accessor bug widening or corrupting those fields.
+            // cppcheck-suppress knownConditionTrueFalse
             if (channels == 0 || channels > 8) {
                 std::abort();
             }
+            // cppcheck-suppress knownConditionTrueFalse
             if (bps == 0 || bps > 32 || bytes_ps == 0 || bytes_ps > 4) {
                 std::abort();
             }
@@ -588,8 +594,9 @@ int main(int argc, char** argv) {
             off += ate;
         }
         // Zero-size output buffer for a frame decode (no frames follow, but the
-        // guard still runs).
-        decoder.decode(hdr.data() + off, hdr.size() - off, &one_byte, 0, consumed, samples);
+        // guard still runs). Result intentionally unchecked: this call only exists to
+        // exercise the zero-capacity guard path, not to assert a particular outcome.
+        (void)decoder.decode(hdr.data() + off, hdr.size() - off, &one_byte, 0, consumed, samples);
     }
 
     // Random blobs with planted fLaC/OggS magics and frame sync codes.

@@ -6,6 +6,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual "Run workflow" from the Actions tab.
+  workflow_dispatch:
 
 # Least privilege: every job here only reads the repo (checkout, build, test, cache). Jobs that
 # need more should add a narrower job-level permissions block rather than widening this default.
@@ -52,6 +54,68 @@ jobs:
         env:
           CLANG_TIDY: clang-tidy-18
         run: ./script/clang-tidy.sh
+
+  include-check:
+    name: Include check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Install clang-include-cleaner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tools-18
+
+      - name: Run include check
+        env:
+          CLANG_INCLUDE_CLEANER: clang-include-cleaner-18
+        run: ./script/check-includes.sh
+
+  cppcheck:
+    name: Cppcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Pin cppcheck and build it from source: ubuntu-latest's apt package lags
+      # by several minor versions and produces different findings than the
+      # version developers run locally (Homebrew). Bump deliberately, in step
+      # with local installs. The build is cached, so only the first run per
+      # version pays the compile.
+      CPPCHECK_VERSION: "2.21.0"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Cache pinned cppcheck
+        id: cache-cppcheck
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/cppcheck-install
+          key: cppcheck-${{ env.CPPCHECK_VERSION }}-${{ runner.os }}
+
+      - name: Build pinned cppcheck
+        if: steps.cache-cppcheck.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$CPPCHECK_VERSION" https://github.com/danmar/cppcheck /tmp/cppcheck
+          cmake -S /tmp/cppcheck -B /tmp/cppcheck/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/cppcheck-install"
+          cmake --build /tmp/cppcheck/build -j"$(nproc)"
+          cmake --install /tmp/cppcheck/build
+
+      - name: Add pinned cppcheck to PATH
+        run: echo "$HOME/cppcheck-install/bin" >> "$GITHUB_PATH"
+
+      - name: Run cppcheck
+        run: ./script/cppcheck.sh
 
   build:
     name: Build
@@ -137,6 +201,39 @@ jobs:
       - name: Run tests
         run: python3 host_examples/flac_to_wav/test_flac_decoder.py --categories subset --build-dir build ${{ matrix.args }}
 
+  fuzz:
+    name: Fuzz build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      # Standalone harness (no libFuzzer runtime needed) under ASan/UBSan.
+      # Guards against harness compile/link regressions and gives the tree a
+      # clang build; deep corpus fuzzing stays a local task (see tests/fuzz).
+      - name: Configure fuzz harness (standalone)
+        run: cmake -B tests/fuzz/build -DFUZZ_USE_LIBFUZZER=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ tests/fuzz
+
+      - name: Build fuzz harness
+        run: cmake --build tests/fuzz/build
+
+      - name: Run standalone torture battery
+        env:
+          FUZZ_ITERATIONS: '500'
+          ASAN_OPTIONS: abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ./tests/fuzz/build/fuzz_flac_decode
+
   platformio:
     name: PlatformIO Build
     runs-on: ubuntu-latest
@@ -190,8 +287,11 @@ jobs:
     needs:
       - pre-commit
       - lint
+      - include-check
+      - cppcheck
       - build
       - test
+      - fuzz
       - platformio
     runs-on: ubuntu-latest
     timeout-minutes: 5

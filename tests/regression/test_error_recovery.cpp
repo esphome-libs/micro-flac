@@ -76,7 +76,7 @@ enum class CodedNumberVariant {
 
 struct SyntheticStream {
     std::vector<uint8_t> bytes;
-    size_t frame_offsets[NUM_FRAMES + 1];  // last entry = end of stream
+    size_t frame_offsets[NUM_FRAMES + 1]{};  // last entry = end of stream
 };
 
 void append_be(std::vector<uint8_t>& out, uint64_t value, size_t num_bytes) {
@@ -139,6 +139,9 @@ SyntheticStream build_stream(CodedNumberVariant first_frame_variant) {
     append_be(out, 0, 3);           // min frame size (unknown)
     append_be(out, 0, 3);           // max frame size (unknown)
     // sample_rate(20) | channels-1(3) | bps-1(5) | total_samples(36)
+    // The channels-1 term is a literal 0 (mono), kept spelled out so the OR chain lines
+    // up one-to-one with the bit-layout comment above.
+    // cppcheck-suppress badBitmaskCheck
     uint64_t packed = (static_cast<uint64_t>(SAMPLE_RATE) << 44) | (0ULL << 41) | (15ULL << 36) |
                       (NUM_FRAMES * BLOCK_SIZE);
     append_be(out, packed, 8);
