@@ -617,7 +617,12 @@ FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_
             uint32_t max_size =
                 this->max_metadata_sizes_ ? this->max_metadata_sizes_[size_index] : 0;
 
-            if (this->header_parse_.length > max_size) {
+            // Skip blocks that exceed the caller's size limit. Also skip zero-length
+            // blocks: they carry no payload, so storing one would push a
+            // FLACMetadataBlock whose data pointer is null (and reach a
+            // memcpy(nullptr, _, 0) below). The skip branch resets the parse state
+            // without allocating or storing anything.
+            if (this->header_parse_.length == 0 || this->header_parse_.length > max_size) {
                 should_skip = true;
             }
         }
