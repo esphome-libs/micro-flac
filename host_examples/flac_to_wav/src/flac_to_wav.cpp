@@ -34,6 +34,9 @@ constexpr uint16_t WAVE_FORMAT_EXTENSIBLE = 0xFFFE;
 constexpr uint16_t WAV_EXTENSIBLE_CB_SIZE = 22;
 constexpr uint32_t PROGRESS_UPDATE_INTERVAL_SECONDS = 10;
 constexpr uint64_t PERCENTAGE_MULTIPLIER = 100;
+// Fixed RIFF bytes preceding the PCM data, excluding the variable fmt chunk body:
+// "WAVE"(4) + "fmt "+size(8) + "data"+size(8).
+constexpr uint32_t WAV_RIFF_FIXED_OVERHEAD = 20;
 }  // namespace
 
 // Pack samples for MD5 computation according to FLAC spec
@@ -68,11 +71,11 @@ static void pack_samples_for_md5(const uint8_t* padded_samples, uint8_t* packed_
         // Sign-extend to fill the container. Use unsigned shifts: for a 32-bit
         // sample, 1 << 31 overflows int and 1 << 32 is an out-of-range shift —
         // both undefined behavior.
-        uint32_t sign_bit = 1u << (bits_per_sample - 1);
+        uint32_t sign_bit = 1U << (bits_per_sample - 1);
         if (static_cast<uint32_t>(sample) & sign_bit) {
             // Negative number - set every bit above the sample width.
             uint32_t value_mask =
-                (bits_per_sample >= 32) ? 0xFFFFFFFFu : ((1u << bits_per_sample) - 1u);
+                (bits_per_sample >= 32) ? UINT32_MAX : ((1U << bits_per_sample) - 1U);
             sample |= static_cast<int32_t>(~value_mask);
         }
 
@@ -206,8 +209,7 @@ static void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_chan
 
     // data chunk
     std::memcpy(data_chunk.data, "data", 4);
-    // "WAVE"(4) + fmt chunk(8 + fmt_size) + "data"+size(8) precede the PCM data in the RIFF size.
-    uint32_t non_data_bytes = 20 + header.fmt_size;
+    uint32_t non_data_bytes = WAV_RIFF_FIXED_OVERHEAD + header.fmt_size;
     data_chunk.data_size =
         clamp_wav_data_size(num_samples, num_channels, bytes_per_sample, non_data_bytes);
 
@@ -421,8 +423,9 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
         samples_per_channel_decoded += samples_this_frame;
         frames_decoded++;
 
-        if (total_samples > 0 &&
-            samples_per_channel_decoded % (sample_rate * PROGRESS_UPDATE_INTERVAL_SECONDS) == 0) {
+        const uint64_t progress_interval =
+            static_cast<uint64_t>(sample_rate) * PROGRESS_UPDATE_INTERVAL_SECONDS;
+        if (total_samples > 0 && samples_per_channel_decoded % progress_interval == 0) {
             std::printf("  Decoded %llu / %llu samples per channel (%llu%%)\n",
                         static_cast<unsigned long long>(samples_per_channel_decoded),
                         static_cast<unsigned long long>(total_samples),
