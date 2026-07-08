@@ -65,13 +65,15 @@ static void pack_samples_for_md5(const uint8_t* padded_samples, uint8_t* packed_
         // Right-shift to remove padding
         sample >>= shift_amount;
 
-        // Sign-extend to fill the container
-        // Create a mask for the sign bit
-        int32_t sign_bit = 1 << (bits_per_sample - 1);
-        if (sample & sign_bit) {
-            // Negative number - extend sign bits
-            int32_t extension_mask = ~((1 << bits_per_sample) - 1);
-            sample |= extension_mask;
+        // Sign-extend to fill the container. Use unsigned shifts: for a 32-bit
+        // sample, 1 << 31 overflows int and 1 << 32 is an out-of-range shift —
+        // both undefined behavior.
+        uint32_t sign_bit = 1u << (bits_per_sample - 1);
+        if (static_cast<uint32_t>(sample) & sign_bit) {
+            // Negative number - set every bit above the sample width.
+            uint32_t value_mask =
+                (bits_per_sample >= 32) ? 0xFFFFFFFFu : ((1u << bits_per_sample) - 1u);
+            sample |= static_cast<int32_t>(~value_mask);
         }
 
         for (uint32_t byte = 0; byte < bytes_per_padded_sample; byte++) {
@@ -106,8 +108,34 @@ struct WAVDataChunk {
     uint32_t data_size;  // Data chunk size
 };
 
+// WAV/RIFF stores every chunk size in a 32-bit field, so a .wav cannot exceed
+// ~4 GiB. Compute the PCM data size in 64-bit; if it (or the resulting RIFF
+// size, which also includes non_data_bytes) would overflow the 32-bit field,
+// clamp to the largest whole number of sample frames that still fits and warn,
+// instead of silently writing a wrapped (corrupt) size.
+static uint32_t clamp_wav_data_size(uint64_t samples_per_channel, uint32_t num_channels,
+                                    uint32_t bytes_per_sample, uint32_t non_data_bytes) {
+    const uint64_t frame_bytes = static_cast<uint64_t>(num_channels) * bytes_per_sample;
+    if (frame_bytes == 0) {
+        return 0;
+    }
+    const uint64_t data_size = samples_per_channel * frame_bytes;
+    const uint64_t max_data = UINT32_MAX - non_data_bytes;
+    if (data_size <= max_data) {
+        return static_cast<uint32_t>(data_size);
+    }
+    const uint64_t clamped = (max_data / frame_bytes) * frame_bytes;  // whole frames only
+    std::fprintf(stderr,
+                 "Warning: decoded audio exceeds the ~4 GiB WAV/RIFF size limit; clamping the "
+                 "WAV size fields to %llu bytes (%llu samples/channel). Players will stop there; "
+                 "a container other than WAV is needed for the full stream.\n",
+                 static_cast<unsigned long long>(clamped),
+                 static_cast<unsigned long long>(clamped / frame_bytes));
+    return static_cast<uint32_t>(clamped);
+}
+
 static void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_channels,
-                             uint16_t bits_per_sample, uint32_t num_samples) {
+                             uint16_t bits_per_sample, uint64_t num_samples) {
     WAVHeader header{};
     WAVExtensibleHeader ext_header{};
     WAVDataChunk data_chunk{};
@@ -178,7 +206,10 @@ static void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_chan
 
     // data chunk
     std::memcpy(data_chunk.data, "data", 4);
-    data_chunk.data_size = num_samples * num_channels * bytes_per_sample;
+    // "WAVE"(4) + fmt chunk(8 + fmt_size) + "data"+size(8) precede the PCM data in the RIFF size.
+    uint32_t non_data_bytes = 20 + header.fmt_size;
+    data_chunk.data_size =
+        clamp_wav_data_size(num_samples, num_channels, bytes_per_sample, non_data_bytes);
 
     // Calculate file size
     uint32_t fmt_chunk_size = 8 + header.fmt_size;            // "fmt " + size + data
@@ -243,12 +274,14 @@ static bool parse_args(int argc, const char* const argv[], Args& args) {
 }
 
 static void update_wav_header(const char* output_file, long header_end_pos,
-                              uint32_t samples_per_channel_decoded, uint32_t num_channels,
+                              uint64_t samples_per_channel_decoded, uint32_t num_channels,
                               uint32_t bytes_per_sample) {
     FILE* f = std::fopen(output_file, "r+b");
     if (f) {
-        uint32_t data_size = samples_per_channel_decoded * num_channels * bytes_per_sample;
-        uint32_t file_size = static_cast<uint32_t>(header_end_pos) - 8 + data_size;
+        uint32_t non_data_bytes = static_cast<uint32_t>(header_end_pos) - 8;
+        uint32_t data_size = clamp_wav_data_size(samples_per_channel_decoded, num_channels,
+                                                 bytes_per_sample, non_data_bytes);
+        uint32_t file_size = non_data_bytes + data_size;
 
         std::fseek(f, 4, SEEK_SET);
         std::fwrite(&file_size, 4, 1, f);
@@ -337,7 +370,7 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
 
     // Decode state
     uint32_t frames_decoded = 0;
-    uint32_t samples_per_channel_decoded = 0;
+    uint64_t samples_per_channel_decoded = 0;
 
     // Helper lambda to process decoded samples (MD5 update + WAV write)
     auto process_decoded_samples = [&](size_t num_samples) {
@@ -390,11 +423,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
 
         if (total_samples > 0 &&
             samples_per_channel_decoded % (sample_rate * PROGRESS_UPDATE_INTERVAL_SECONDS) == 0) {
-            std::printf(
-                "  Decoded %u / %llu samples per channel (%llu%%)\n", samples_per_channel_decoded,
-                static_cast<unsigned long long>(total_samples),
-                static_cast<unsigned long long>(static_cast<uint64_t>(samples_per_channel_decoded) *
-                                                PERCENTAGE_MULTIPLIER / total_samples));
+            std::printf("  Decoded %llu / %llu samples per channel (%llu%%)\n",
+                        static_cast<unsigned long long>(samples_per_channel_decoded),
+                        static_cast<unsigned long long>(total_samples),
+                        static_cast<unsigned long long>(samples_per_channel_decoded *
+                                                        PERCENTAGE_MULTIPLIER / total_samples));
         }
     };
 
@@ -499,7 +532,7 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                         uint16_t wav_bps =
                             output_32bit ? BIT_DEPTH_32 : static_cast<uint16_t>(bits_per_sample);
                         write_wav_header(wav_file, sample_rate, static_cast<uint16_t>(num_channels),
-                                         wav_bps, static_cast<uint32_t>(total_samples));
+                                         wav_bps, total_samples);
                     }
                     header_end_pos = std::ftell(wav_file);
                     break;
@@ -544,7 +577,8 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
 
     std::printf("Successfully converted to WAV!\n");
     std::printf("Frames decoded: %u\n", frames_decoded);
-    std::printf("Samples per channel decoded: %u\n", samples_per_channel_decoded);
+    std::printf("Samples per channel decoded: %llu\n",
+                static_cast<unsigned long long>(samples_per_channel_decoded));
     std::printf("Output file: %s\n", output_file);
 
     verify_md5(md5_ctx, md5_sig, md5_all_zero);
