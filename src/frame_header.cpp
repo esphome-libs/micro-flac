@@ -25,47 +25,79 @@ static constexpr uint8_t SAMPLE_RATE_CODE_KHZ_1BYTE = 12;
 static constexpr uint8_t SAMPLE_RATE_CODE_HZ_2BYTE = 13;
 static constexpr uint8_t SAMPLE_RATE_CODE_TENS_HZ_2BYTE = 14;
 
-uint8_t compute_frame_header_length(const uint8_t* header) {
-    // UTF-8 coded number length from first byte (byte[4])
+namespace {
+
+// Layout of the variable-position frame header fields (RFC 9639 Section 9.1):
+// [sync+flags(4) | coded number(1-7) | block size extra(0-2) |
+// sample rate extra(0-2) | crc8(1)], all determined by the first five bytes.
+// Single source of truth for compute_frame_header_length and
+// parse_frame_header so their field positions can never disagree.
+struct FrameHeaderLayout {
+    uint8_t utf8_len;           // coded number byte count; 0 = invalid encoding
+    uint8_t block_size_extra;   // uncommon block size bytes (0-2)
+    uint8_t sample_rate_extra;  // uncommon sample rate bytes (0-2)
+};
+
+FrameHeaderLayout compute_layout(const uint8_t* header) {
+    FrameHeaderLayout layout{};
+
+    // UTF-8 coded number length from its leading byte (byte[4])
     uint8_t utf8_first = header[4];
-    uint8_t utf8_len = 1;
-    if (utf8_first >= 0x80 && utf8_first < 0xC0) {  // NOLINT(readability-magic-numbers)
-        // Continuation bytes (0x80-0xBF) are invalid as a leading byte
-        return 0;
-    }
-    if (utf8_first >= 0xC0) {  // NOLINT(readability-magic-numbers)
+    layout.utf8_len = 1;
+    // Continuation bytes (0x80-0xBF) and 0xFF are invalid as a leading byte;
+    // RFC 9639 Table 18 tops out at 0xFE.
+    // NOLINTNEXTLINE(readability-magic-numbers)
+    if ((utf8_first >= 0x80 && utf8_first < 0xC0) || utf8_first == 0xFF) {
+        layout.utf8_len = 0;
+    } else if (utf8_first >= 0xC0) {  // NOLINT(readability-magic-numbers)
         uint8_t mask = utf8_first;
-        utf8_len = 0;
+        layout.utf8_len = 0;
         while (mask & 0x80) {
-            utf8_len++;
+            layout.utf8_len++;
             mask = static_cast<uint8_t>(mask << 1);
         }
-        if (utf8_len > 7) {
-            utf8_len = 7;  // FLAC spec max is 7 bytes
+        // The 7-byte form (0xFE) encodes 36 bits, which only sample numbers use.
+        // Fixed-block-size streams (blocking strategy bit clear) carry a frame
+        // number capped at 31 bits = 6 encoded bytes (RFC 9639 Section 9.1.5).
+        if (layout.utf8_len == 7 && (header[1] & 0x01) == 0) {
+            layout.utf8_len = 0;
         }
     }
 
     // Block size extra bytes from block_size_code (upper nibble of byte[2])
     uint8_t block_size_code = header[2] >> 4;
-    uint8_t block_size_extra = 0;
     if (block_size_code == 6) {
-        block_size_extra = 1;
+        layout.block_size_extra = 1;
     } else if (block_size_code == 7) {
-        block_size_extra = 2;
+        layout.block_size_extra = 2;
     }
 
     // Sample rate extra bytes from sample_rate_code (lower nibble of byte[2])
     uint8_t sample_rate_code = header[2] & 0x0F;  // NOLINT(readability-magic-numbers)
-    uint8_t sample_rate_extra = 0;
     if (sample_rate_code == SAMPLE_RATE_CODE_KHZ_1BYTE) {
-        sample_rate_extra = 1;
+        layout.sample_rate_extra = 1;
     } else if (sample_rate_code == SAMPLE_RATE_CODE_HZ_2BYTE ||
                sample_rate_code == SAMPLE_RATE_CODE_TENS_HZ_2BYTE) {
-        sample_rate_extra = 2;
+        layout.sample_rate_extra = 2;
     }
 
-    // Total: 4 fixed bytes + utf8_len + extras + 1 CRC-8
-    return static_cast<uint8_t>(4 + utf8_len + block_size_extra + sample_rate_extra + 1);
+    return layout;
+}
+
+uint8_t layout_total_length(const FrameHeaderLayout& layout) {
+    // Total: 4 fixed bytes + coded number + extras + 1 CRC-8
+    return static_cast<uint8_t>(4 + layout.utf8_len + layout.block_size_extra +
+                                layout.sample_rate_extra + 1);
+}
+
+}  // namespace
+
+uint8_t compute_frame_header_length(const uint8_t* header) {
+    FrameHeaderLayout layout = compute_layout(header);
+    if (layout.utf8_len == 0) {
+        return 0;
+    }
+    return layout_total_length(layout);
 }
 
 FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
@@ -115,31 +147,26 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
 
     // Reserved bit (header[3] & 0x01) not checked; some encoders don't respect it
 
-    // 9.1.5 Coded number (UTF-8 like variable length code) - skip, seeking not supported
-    // Byte index advances past the UTF-8 coded number to the extra fields.
-    // compute_frame_header_length already determined the total length, so we compute
-    // the offset of the extra bytes by working backwards from the end.
-
-    // The extra fields sit just before the final CRC-8 byte.
-    // Layout: [sync(2) | byte2 | byte3 | utf8(1-7) | block_size_extra(0-2) |
-    // sample_rate_extra(0-2) | crc8(1)]
-    uint8_t block_size_extra = 0;
-    if (block_size_code == 6) {
-        block_size_extra = 1;
-    } else if (block_size_code == 7) {
-        block_size_extra = 2;
+    // 9.1.5 Coded number (UTF-8 like variable length code) - value skipped, seeking
+    // not supported. The extra fields' positions come from the shared layout;
+    // header_len was derived from the same layout by compute_frame_header_length,
+    // so a mismatch means the caller handed us a differently-sized buffer.
+    FrameHeaderLayout layout = compute_layout(header);
+    if (layout.utf8_len == 0 || layout_total_length(layout) != header_len) {
+        return FLAC_DECODER_ERROR_BAD_HEADER;
     }
 
-    uint8_t sample_rate_extra = 0;
-    if (sample_rate_code == SAMPLE_RATE_CODE_KHZ_1BYTE) {
-        sample_rate_extra = 1;
-    } else if (sample_rate_code == SAMPLE_RATE_CODE_HZ_2BYTE ||
-               sample_rate_code == SAMPLE_RATE_CODE_TENS_HZ_2BYTE) {
-        sample_rate_extra = 2;
-    }
+    // Index of the extra fields, just past the coded number
+    uint8_t extra_idx = static_cast<uint8_t>(4 + layout.utf8_len);
 
-    // Index of extra fields: header_len - 1 (crc8) - sample_rate_extra - block_size_extra
-    uint8_t extra_idx = static_cast<uint8_t>(header_len - 1 - sample_rate_extra - block_size_extra);
+    // The coded number's value is unused (no seeking), but its continuation bytes
+    // (header[5] through the byte before the extra fields) must still match the
+    // 10xxxxxx pattern (RFC 9639 Table 18) for the header to be well formed.
+    for (uint8_t i = 5; i < extra_idx; i++) {
+        if ((header[i] & 0xC0) != 0x80) {  // NOLINT(readability-magic-numbers)
+            return FLAC_DECODER_ERROR_BAD_HEADER;
+        }
+    }
 
     // 9.1.6 Uncommon block size
     if (block_size_code == 6) {

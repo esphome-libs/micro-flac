@@ -761,6 +761,9 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame(const uint8_t* buffer, size
             return ret;
         }
         if (ret != FLAC_DECODER_SUCCESS) {
+            // buffer_index_ is relative to the sub-buffer (data); re-base it to the
+            // caller's buffer so the bytes_consumed reported for this error is usable.
+            this->buffer_index_ += consumed;
             this->reset_frame_state();
             return ret;
         }
@@ -777,6 +780,9 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame(const uint8_t* buffer, size
             return ret;
         }
         if (ret != FLAC_DECODER_SUCCESS) {
+            // Same re-basing as the success path below: without it, bytes_consumed
+            // omits the header bytes and callers can never resync after a CRC error.
+            this->buffer_index_ += consumed;
             this->reset_frame_state();
             return ret;
         }
@@ -956,6 +962,10 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame_footer_phase(const uint8_t*
     }
 
     if (this->enable_crc_check_ && crc_read != this->frame_.running_crc16) {
+        // Push back over-read bytes just like the success path: the full frame
+        // (through its CRC field) is consumed, so bytes_consumed lands exactly on
+        // the next frame's sync code and callers can resume decoding there.
+        this->reset_bit_buffer();
         return FLAC_DECODER_ERROR_CRC_MISMATCH;
     }
 
