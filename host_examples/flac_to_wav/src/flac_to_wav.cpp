@@ -59,24 +59,24 @@ static void pack_samples_for_md5(const uint8_t* padded_samples, uint8_t* packed_
             padded_samples + (static_cast<size_t>(i) * bytes_per_padded_sample);
         uint8_t* output_ptr = packed_output + (static_cast<size_t>(i) * bytes_per_padded_sample);
 
-        // Read the padded sample (LSB-padded by decoder)
-        int32_t sample = 0;
+        // Read the padded sample (LSB-padded by decoder). Assemble, shift, and
+        // sign-extend entirely in uint32_t: a signed left-shift into the sign bit
+        // (e.g. byte 3 << 24 for 25-31 bps) would be undefined behavior.
+        uint32_t sample = 0;
         for (uint32_t byte = 0; byte < bytes_per_padded_sample; byte++) {
-            sample |= (static_cast<int32_t>(sample_ptr[byte])) << (byte * 8);
+            sample |= static_cast<uint32_t>(sample_ptr[byte]) << (byte * 8);
         }
 
-        // Right-shift to remove padding
+        // Right-shift to remove padding.
         sample >>= shift_amount;
 
-        // Sign-extend to fill the container. Use unsigned shifts: for a 32-bit
-        // sample, 1 << 31 overflows int and 1 << 32 is an out-of-range shift —
-        // both undefined behavior.
+        // Sign-extend to fill the container.
         uint32_t sign_bit = 1U << (bits_per_sample - 1);
-        if (static_cast<uint32_t>(sample) & sign_bit) {
+        if (sample & sign_bit) {
             // Negative number - set every bit above the sample width.
             uint32_t value_mask =
                 (bits_per_sample >= 32) ? UINT32_MAX : ((1U << bits_per_sample) - 1U);
-            sample |= static_cast<int32_t>(~value_mask);
+            sample |= ~value_mask;
         }
 
         for (uint32_t byte = 0; byte < bytes_per_padded_sample; byte++) {
@@ -112,29 +112,26 @@ struct WAVDataChunk {
 };
 
 // WAV/RIFF stores every chunk size in a 32-bit field, so a .wav cannot exceed
-// ~4 GiB. Compute the PCM data size in 64-bit; if it (or the resulting RIFF
-// size, which also includes non_data_bytes) would overflow the 32-bit field,
-// clamp to the largest whole number of sample frames that still fits and warn,
-// instead of silently writing a wrapped (corrupt) size.
-static uint32_t clamp_wav_data_size(uint64_t samples_per_channel, uint32_t num_channels,
-                                    uint32_t bytes_per_sample, uint32_t non_data_bytes) {
+// ~4 GiB. Largest whole-frame PCM data size (bytes) whose value, and the
+// resulting RIFF size (data + non_data_bytes), both fit those 32-bit fields.
+static uint32_t wav_max_data_bytes(uint32_t num_channels, uint32_t bytes_per_sample,
+                                   uint32_t non_data_bytes) {
     const uint64_t frame_bytes = static_cast<uint64_t>(num_channels) * bytes_per_sample;
     if (frame_bytes == 0) {
         return 0;
     }
-    const uint64_t data_size = samples_per_channel * frame_bytes;
     const uint64_t max_data = UINT32_MAX - non_data_bytes;
-    if (data_size <= max_data) {
-        return static_cast<uint32_t>(data_size);
-    }
-    const uint64_t clamped = (max_data / frame_bytes) * frame_bytes;  // whole frames only
-    std::fprintf(stderr,
-                 "Warning: decoded audio exceeds the ~4 GiB WAV/RIFF size limit; clamping the "
-                 "WAV size fields to %llu bytes (%llu samples/channel). Players will stop there; "
-                 "a container other than WAV is needed for the full stream.\n",
-                 static_cast<unsigned long long>(clamped),
-                 static_cast<unsigned long long>(clamped / frame_bytes));
-    return static_cast<uint32_t>(clamped);
+    return static_cast<uint32_t>((max_data / frame_bytes) * frame_bytes);  // whole frames only
+}
+
+// Clamp a WAV data-chunk size to what the 32-bit size fields can hold. Silent:
+// the truncation warning is emitted once, where PCM is actually dropped.
+static uint32_t clamp_wav_data_size(uint64_t samples_per_channel, uint32_t num_channels,
+                                    uint32_t bytes_per_sample, uint32_t non_data_bytes) {
+    const uint64_t frame_bytes = static_cast<uint64_t>(num_channels) * bytes_per_sample;
+    const uint64_t data_size = samples_per_channel * frame_bytes;
+    const uint32_t max_data = wav_max_data_bytes(num_channels, bytes_per_sample, non_data_bytes);
+    return (data_size <= max_data) ? static_cast<uint32_t>(data_size) : max_data;
 }
 
 static void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_channels,
@@ -361,6 +358,12 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     uint32_t bytes_per_sample_out = 0;
     uint8_t md5_sig[16]{};
 
+    // WAV size cap: never write PCM past the 32-bit RIFF size limit (~4 GiB).
+    uint32_t wav_frame_bytes_out = 0;
+    uint32_t wav_data_byte_limit = 0;
+    uint64_t wav_data_bytes_written = 0;
+    bool wav_size_capped = false;
+
     std::vector<uint8_t> output_buffer;
     std::vector<int32_t> output_buffer_32;
     size_t output_buffer_size = 0;
@@ -406,17 +409,37 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
         }
 
         if (wav_file) {
-            if (output_32bit) {
-                std::fwrite(output_buffer_32.data(), 1, bytes_to_write, wav_file);
-            } else {
-                if (bits_per_sample == 8) {
-                    for (uint32_t i = 0; i < bytes_to_write; i++) {
-                        output_buffer[i] =
-                            static_cast<uint8_t>(static_cast<int8_t>(output_buffer[i]) + 128);
-                    }
+            // WAV/RIFF size fields are 32-bit, so never write PCM past ~4 GiB.
+            // Decoding continues past this point so the MD5 still covers the whole
+            // stream; only the .wav is truncated.
+            uint32_t writable = bytes_to_write;
+            if (wav_data_bytes_written + writable > wav_data_byte_limit) {
+                writable = static_cast<uint32_t>(wav_data_byte_limit - wav_data_bytes_written);
+                if (!wav_size_capped) {
+                    wav_size_capped = true;
+                    std::fprintf(
+                        stderr,
+                        "Warning: decoded audio exceeds the ~4 GiB WAV/RIFF limit; the "
+                        ".wav is truncated to %llu bytes (%llu samples/channel). The full "
+                        "stream is still decoded, so the MD5 check covers all of it.\n",
+                        static_cast<unsigned long long>(wav_data_byte_limit),
+                        static_cast<unsigned long long>(wav_data_byte_limit / wav_frame_bytes_out));
                 }
-                std::fwrite(output_buffer.data(), 1, bytes_to_write, wav_file);
             }
+            if (writable > 0) {
+                if (output_32bit) {
+                    std::fwrite(output_buffer_32.data(), 1, writable, wav_file);
+                } else {
+                    if (bits_per_sample == 8) {
+                        for (uint32_t i = 0; i < writable; i++) {
+                            output_buffer[i] =
+                                static_cast<uint8_t>(static_cast<int8_t>(output_buffer[i]) + 128);
+                        }
+                    }
+                    std::fwrite(output_buffer.data(), 1, writable, wav_file);
+                }
+            }
+            wav_data_bytes_written += writable;
         }
 
         uint32_t samples_this_frame = (num_channels > 0) ? (num_samples_u32 / num_channels) : 0;
@@ -538,6 +561,10 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                                          wav_bps, total_samples);
                     }
                     header_end_pos = std::ftell(wav_file);
+                    wav_frame_bytes_out = num_channels * bytes_per_sample_out;
+                    wav_data_byte_limit =
+                        wav_max_data_bytes(num_channels, bytes_per_sample_out,
+                                           static_cast<uint32_t>(header_end_pos) - 8);
                     break;
                 }
                 case FLAC_DECODER_SUCCESS:
