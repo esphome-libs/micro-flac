@@ -13,10 +13,11 @@
 // limitations under the License.
 
 /// @file frame_header.h
-/// @brief FLAC frame header parsing and validation
+/// @brief FLAC frame header parsing (decoder) and writing (encoder)
 ///
-/// Provides frame header length computation and parsing with CRC-8 validation
-/// and STREAMINFO consistency checks.
+/// Parsing computes the header length, validates CRC-8 and checks the fields
+/// against STREAMINFO. Writing chooses each field's code and emits a
+/// fixed-blocksize header with its CRC-8.
 
 #pragma once
 
@@ -25,6 +26,10 @@
 #include <cstdint>
 
 namespace micro_flac {
+
+// ============================================================================
+// Parsing
+// ============================================================================
 
 /// @brief Parsed frame header fields
 struct FrameHeaderInfo {
@@ -59,5 +64,55 @@ uint8_t compute_frame_header_length(const uint8_t* header);
 FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
                                      const FLACStreamInfo& stream_info, bool crc_check,
                                      FrameHeaderInfo& info);
+
+// ============================================================================
+// Writing
+// ============================================================================
+
+/// @brief Largest frame header write_frame_header() produces
+///
+/// 4 fixed bytes, a 6-byte coded frame number (31 bits), 2 bytes each of
+/// uncommon block size and sample rate, and the CRC-8.
+static constexpr uint8_t FRAME_HEADER_MAX_WRITE_LENGTH = 15;
+
+/// @brief A sample rate's frame header code and the extra bytes it needs
+struct SampleRateCode {
+    uint8_t code{0};
+    uint8_t extra[2]{};    // Big-endian
+    uint8_t extra_len{0};  // 0, 1, or 2
+};
+
+/// @brief The fields of a fixed-blocksize frame header
+struct FrameHeaderFields {
+    uint32_t frame_number{0};
+    uint32_t block_size{0};
+    uint8_t channel_assignment{0};
+    uint8_t bits_per_sample_code{0};
+    SampleRateCode sample_rate;
+};
+
+/// @brief Choose the frame header code for a sample rate
+///
+/// Prefers a table entry, then the escape with the fewest extra bytes, then
+/// code 0 (read the rate from STREAMINFO), which is outside the streamable
+/// subset.
+///
+/// @param sample_rate Sample rate in Hz
+/// @param out [out] The code and its extra bytes
+/// @return false if STREAMINFO cannot carry the rate (0, or above 1048575 Hz)
+bool select_sample_rate_code(uint32_t sample_rate, SampleRateCode& out);
+
+/// @brief Frame header code for a bit depth
+///
+/// @return The table's code, or BPS_CODE_FROM_STREAMINFO for a depth the
+///         table has no entry for
+uint8_t select_bits_per_sample_code(uint32_t bits_per_sample);
+
+/// @brief Write a fixed-blocksize frame header, ending with its CRC-8
+///
+/// @param out Destination, with room for FRAME_HEADER_MAX_WRITE_LENGTH bytes
+/// @param fields The header's fields; frame_number must fit in 31 bits
+/// @return Bytes written
+uint8_t write_frame_header(uint8_t* out, const FrameHeaderFields& fields);
 
 }  // namespace micro_flac

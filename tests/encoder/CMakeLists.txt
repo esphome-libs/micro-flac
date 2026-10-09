@@ -13,6 +13,12 @@ endif()
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../.. micro-flac-build)
 
+# Check the encoder's Pass A overflow proof at run time: its partial sums
+# widen to 64 bits and trap if any passes 32 (sum_chunk_samples() in
+# src/flac_encoder.cpp). An overflow there would not change the encoded
+# bytes, so no output comparison can catch it.
+target_compile_definitions(micro_flac PRIVATE MICRO_FLAC_CHECK_SCAN_SUMS)
+
 set(TEST_WARNINGS
     -Wall
     -Wextra
@@ -34,5 +40,15 @@ target_link_libraries(test_bit_writer PRIVATE micro_flac)
 target_include_directories(test_bit_writer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_compile_options(test_bit_writer PRIVATE -O2 ${TEST_WARNINGS})
 
+# -fno-access-control (GCC and Clang) turns off access checking for this
+# translation unit only, so the test can read and set FLACEncoder's private
+# members without the public header carrying test-only accessors. The
+# library itself is built without it.
+add_executable(test_encoder_config test_encoder_config.cpp)
+target_link_libraries(test_encoder_config PRIVATE micro_flac)
+target_include_directories(test_encoder_config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+target_compile_options(test_encoder_config PRIVATE -fno-access-control -O2 ${TEST_WARNINGS})
+
 enable_testing()
 add_test(NAME bit_writer COMMAND test_bit_writer)
+add_test(NAME encoder_config COMMAND test_encoder_config)

@@ -8,12 +8,16 @@ set(__flac_sources_defined TRUE)
 
 function(flac_get_sources SOURCE_DIR)
     set(FLAC_SOURCES
-        ${SOURCE_DIR}/src/flac_decoder.cpp
-        ${SOURCE_DIR}/src/decorrelation.cpp
+        # Shared by the decoder and encoder
+        ${SOURCE_DIR}/src/crc.cpp
         ${SOURCE_DIR}/src/frame_header.cpp
         ${SOURCE_DIR}/src/pcm_packing.cpp
-        ${SOURCE_DIR}/src/crc.cpp
+        # Decoder
+        ${SOURCE_DIR}/src/flac_decoder.cpp
+        ${SOURCE_DIR}/src/decorrelation.cpp
         ${SOURCE_DIR}/src/lpc.cpp
+        # Encoder
+        ${SOURCE_DIR}/src/flac_encoder.cpp
         PARENT_SCOPE
     )
 
