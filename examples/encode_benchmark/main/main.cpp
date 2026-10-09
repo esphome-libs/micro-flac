@@ -29,6 +29,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "flac_format.h"  // Channel assignment codes (src/, see main/CMakeLists.txt)
 #include "micro_flac/flac_decoder.h"
 #include "micro_flac/flac_encoder.h"
 #include "micro_flac/pcm_format.h"
@@ -152,14 +153,6 @@ int16_t* decode_test_audio(uint32_t& out_sample_rate, uint32_t& out_channels,
 // any one-time warmup cost (cache fills, etc.) over the total.
 constexpr uint32_t NUM_PASSES = 8;
 
-// Channel assignment codes (RFC 9639 SS9.1.3), the upper nibble of frame
-// header byte 3. Duplicated from src/flac_format.h, which the ESP-IDF
-// component keeps private.
-constexpr uint8_t CHANNEL_ASSIGNMENT_INDEPENDENT = 1;
-constexpr uint8_t CHANNEL_ASSIGNMENT_LEFT_SIDE = 8;
-constexpr uint8_t CHANNEL_ASSIGNMENT_RIGHT_SIDE = 9;
-constexpr uint8_t CHANNEL_ASSIGNMENT_MID_SIDE = 10;
-
 struct EncodeBenchmarkStats {
     const char* label = "";
     uint32_t bits_per_sample = 16;
@@ -282,16 +275,16 @@ EncodeBenchmarkStats run_encode_benchmark(const uint8_t* input, uint32_t samples
 
             const uint8_t assignment_code = static_cast<uint8_t>(out_buffer[3] >> 4);
             switch (assignment_code) {
-                case CHANNEL_ASSIGNMENT_INDEPENDENT:
+                case CHANNEL_INDEPENDENT_STEREO:
                     stats.assignment_independent++;
                     break;
-                case CHANNEL_ASSIGNMENT_LEFT_SIDE:
+                case CHANNEL_LEFT_SIDE:
                     stats.assignment_left_side++;
                     break;
-                case CHANNEL_ASSIGNMENT_RIGHT_SIDE:
+                case CHANNEL_RIGHT_SIDE:
                     stats.assignment_right_side++;
                     break;
-                case CHANNEL_ASSIGNMENT_MID_SIDE:
+                case CHANNEL_MID_SIDE:
                     stats.assignment_mid_side++;
                     break;
                 default:
@@ -354,9 +347,13 @@ void print_benchmark_results(const EncodeBenchmarkStats& stats) {
     const double pcm_bytes = stats.bits_per_sample / 8.0;
     printf("Compression ratio vs %lu-bit PCM: %.3f\n", (unsigned long)stats.bits_per_sample,
            bytes_per_sample > 0.0 ? pcm_bytes / bytes_per_sample : 0.0);
-    printf("Channel assignment counts: independent=%lu left/side=%lu right/side=%lu mid/side=%lu\n",
-           (unsigned long)stats.assignment_independent, (unsigned long)stats.assignment_left_side,
-           (unsigned long)stats.assignment_right_side, (unsigned long)stats.assignment_mid_side);
+    if (stats.num_channels == 2) {  // Mono frames carry no stereo assignment
+        printf(
+            "Channel assignment counts: independent=%lu left/side=%lu right/side=%lu "
+            "mid/side=%lu\n",
+            (unsigned long)stats.assignment_independent, (unsigned long)stats.assignment_left_side,
+            (unsigned long)stats.assignment_right_side, (unsigned long)stats.assignment_mid_side);
+    }
 }
 
 void print_summary(const EncodeBenchmarkStats* stats, size_t count) {
