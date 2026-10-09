@@ -195,6 +195,7 @@ bool read_wav_header(FILE* f, WavInfo& info) {
 
 struct Args {
     uint32_t block_size = DEFAULT_BLOCK_SIZE;
+    uint8_t max_rice_partition_order = 0;
     bool wasted_bits = FLACEncoderOptions{}.wasted_bits;
     const char* input_file = nullptr;
     const char* output_file = nullptr;
@@ -221,6 +222,22 @@ bool parse_args(int argc, const char* const argv[], Args& args) {
             }
             args.block_size = static_cast<uint32_t>(value);
             arg_idx += 2;
+        } else if (std::strcmp(arg, "--partition-order") == 0) {
+            if (arg_idx + 1 >= argc) {
+                std::fprintf(stderr, "Error: --partition-order requires a value\n");
+                return false;
+            }
+            char* end = nullptr;
+            const long value = std::strtol(argv[arg_idx + 1], &end, 10);
+            if (end == argv[arg_idx + 1] || *end != '\0' || value < 0 ||
+                value > FLACEncoder::MAX_RICE_PARTITION_ORDER) {
+                std::fprintf(stderr, "Error: invalid --partition-order '%s' (must be 0-%u)\n",
+                             argv[arg_idx + 1],
+                             static_cast<unsigned>(FLACEncoder::MAX_RICE_PARTITION_ORDER));
+                return false;
+            }
+            args.max_rice_partition_order = static_cast<uint8_t>(value);
+            arg_idx += 2;
         } else if (std::strcmp(arg, "--no-wasted-bits") == 0) {
             args.wasted_bits = false;
             arg_idx += 1;
@@ -231,7 +248,8 @@ bool parse_args(int argc, const char* const argv[], Args& args) {
 
     if (argc - arg_idx != 2) {
         std::fprintf(stderr,
-                     "Usage: %s [--block-size N] [--no-wasted-bits] <input.wav> <output.flac>\n",
+                     "Usage: %s [--block-size N] [--partition-order N] [--no-wasted-bits] "
+                     "<input.wav> <output.flac>\n",
                      argv[0]);
         return false;
     }
@@ -281,6 +299,7 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
 
     FLACEncoderOptions options;
     options.block_size = args.block_size;
+    options.max_rice_partition_order = args.max_rice_partition_order;
     options.wasted_bits = args.wasted_bits;
 
     FLACEncoder encoder(format, options);
