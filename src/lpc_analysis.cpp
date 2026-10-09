@@ -408,6 +408,34 @@ uint32_t precision_for(uint32_t precision, uint32_t bps, uint32_t order, bool wi
     return (p > LPC_PRECISION_MAX) ? LPC_PRECISION_MAX : p;
 }
 
+// correlate_pair() in 64 bits per product, for a stereo pair's windowed
+// sum. On the narrow path that is within +/-65534, so a product can reach
+// 2^32 and a block's sum 2^48; on the wide path under 2^24, 2^48 and, for the
+// at most LPC_STEREO_WIDE_MAX_SAMPLES samples it takes, 2^63.
+FLAC_ALWAYS_INLINE void correlate_pair_64(const int32_t* w, uint32_t len, uint32_t lag,
+                                          int64_t& sum0, int64_t& sum1) {
+    const int32_t* partner = w - lag;
+    int64_t before = partner[-1];
+    int64_t acc0 = 0;
+    int64_t acc1 = 0;
+    uint32_t i = 0;
+    for (; i + 1 < len; i += 2) {
+        const int64_t a0 = w[i];
+        const int64_t a1 = w[i + 1];
+        const int64_t b0 = partner[i];
+        const int64_t b1 = partner[i + 1];
+        acc0 += (a0 * b0) + (a1 * b1);
+        acc1 += (a0 * before) + (a1 * b0);
+        before = b1;
+    }
+    if (i < len) {
+        acc0 += static_cast<int64_t>(w[i]) * partner[i];
+        acc1 += static_cast<int64_t>(w[i]) * before;
+    }
+    sum0 += acc0;
+    sum1 += acc1;
+}
+
 }  // namespace
 
 // ============================================================================
@@ -474,6 +502,88 @@ void lpc_autocorrelation_update(LpcAutocorrelation& ac, const int32_t* samples, 
         ac.position += len;
         samples += len;
         m -= len;
+    }
+}
+
+void lpc_stereo_autocorrelation_begin(LpcStereoAutocorrelation& st, uint32_t n, uint32_t lags,
+                                      uint32_t bps, bool wide) {
+    if (wide) {
+        lpc_autocorrelation_begin_wide(st.left, n, lags, bps);
+        lpc_autocorrelation_begin_wide(st.right, n, lags, bps);
+    } else {
+        lpc_autocorrelation_begin(st.left, n, lags, bps);
+        lpc_autocorrelation_begin(st.right, n, lags, bps);
+    }
+    for (int64_t& s : st.sum_lr) {
+        s = 0;
+    }
+    st.bps = bps;
+}
+
+void lpc_stereo_autocorrelation_update(LpcStereoAutocorrelation& st, const int32_t* left,
+                                       const int32_t* right, uint32_t m, int32_t* work_left,
+                                       int32_t* work_right) {
+    const uint32_t lags = st.left.lags;
+    const int32_t* const sum = work_left + LPC_MAX_ORDER;
+    while (m > 0) {
+        const uint32_t len = (m > LPC_KERNEL_SAMPLES) ? LPC_KERNEL_SAMPLES : m;
+        // One piece each: afterwards both work buffers hold [history, piece]
+        // windowed, and both channels' histories are saved. Adding right's
+        // buffer into left's makes the sum's own [history, piece], which is
+        // then correlated like a channel.
+        lpc_autocorrelation_update(st.left, left, len, work_left);
+        lpc_autocorrelation_update(st.right, right, len, work_right);
+        for (uint32_t i = 0; i < LPC_MAX_ORDER + len; i++) {
+            work_left[i] += work_right[i];
+        }
+        uint32_t l = 0;
+        for (; l + 1 <= lags; l += 2) {
+            correlate_pair_64(sum, len, l, st.sum_lr[l], st.sum_lr[l + 1]);
+        }
+        if (l <= lags) {
+            const int32_t* const partner = sum - l;
+            int64_t acc = 0;
+            for (uint32_t i = 0; i < len; i++) {
+                acc += static_cast<int64_t>(sum[i]) * partner[i];
+            }
+            st.sum_lr[l] += acc;
+        }
+        left += len;
+        right += len;
+        m -= len;
+    }
+}
+
+void lpc_stereo_autocorrelation_finish(const LpcStereoAutocorrelation& st, LpcAutocorrelation& mid,
+                                       LpcAutocorrelation& side) {
+    // Not quite what windowing mid and side would give, since each channel's
+    // window rounds on its own; pricing on the real signals makes that
+    // harmless. Everything is read before `mid` and `side`, which may alias
+    // st.left and st.right, are written.
+    const uint32_t n = st.left.n;
+    const uint32_t lags = st.left.lags;
+    const uint32_t channel_shift = st.left.scale_shift;
+    int64_t mid_sum[LPC_MAX_ORDER + 1];
+    int64_t side_sum[LPC_MAX_ORDER + 1];
+    for (uint32_t l = 0; l <= lags; l++) {
+        const int64_t sum_lr = st.sum_lr[l];
+        mid_sum[l] = sum_lr / 4;
+        side_sum[l] = (2 * (st.left.sum[l] + st.right.sum[l])) - sum_lr;
+    }
+    if (st.left.wide) {
+        lpc_autocorrelation_begin_wide(mid, n, lags, st.bps);
+        lpc_autocorrelation_begin_wide(side, n, lags, st.bps + 1);
+    } else {
+        lpc_autocorrelation_begin(mid, n, lags, st.bps);
+        lpc_autocorrelation_begin(side, n, lags, st.bps + 1);
+    }
+    // Each at the windowed scale its own autocorrelation would have. The
+    // sums are at the channels' scale, which mid (at the same depth) shares;
+    // a side past its path's range is scaled down by the difference.
+    const uint32_t side_shift = 2 * (side.scale_shift - channel_shift);
+    for (uint32_t l = 0; l <= lags; l++) {
+        mid.sum[l] = mid_sum[l];
+        side.sum[l] = side_sum[l] >> side_shift;
     }
 }
 

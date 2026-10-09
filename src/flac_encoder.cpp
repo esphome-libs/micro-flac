@@ -654,7 +654,8 @@ struct PackedSignal {
     uint32_t num_channels;
     uint32_t channel;  // The channel read when num_channels != 2
     SignalId sig;      // The candidate derived when num_channels == 2
-    int32_t* buf;      // chunk_; unpack() fills its first chunk_len samples
+    int32_t* buf;      // chunk_; unpack() fills its first chunk_len samples, and the
+                       // stereo search's joint walk unpacks right into the second
     uint32_t chunk_len;
     uint32_t wasted;  // Low zero bits shifted out of every sample
 
@@ -879,12 +880,13 @@ FLAC_ALWAYS_INLINE void write_fixed_header(BitWriterLocal& bw, const PackedSigna
 //
 // A subframe's residuals can be split into 2^p equal partitions, the first
 // short by the predictor order, each with its own Rice parameter (RFC 9639
-// SS9.2.7). It is chosen after the predictor, in Pass B: one walk sums the
-// residual magnitudes per partition at the highest order allowed (the
-// leaves), and choose_partitions() prices every order from those sums,
-// merging neighbors bottom-up as libFLAC does. Pass A is unchanged. The size
-// bound holds partition by partition, so estimate + (n - order) / 2 still
-// bounds the subframe.
+// SS9.2.7). It is chosen after the predictor, in Pass B (or when the stereo
+// search prices its LPC candidates): one walk sums the residual magnitudes
+// per partition at the highest order allowed (the leaves), and
+// choose_partitions() prices every order from those sums, merging neighbors
+// bottom-up as libFLAC does. Pass A is unchanged. The size bound holds
+// partition by partition, so estimate + (n - order) / 2 still bounds the
+// subframe.
 //
 // A subframe that does not split takes the single-partition walks, so with
 // partitioning off, every other option runs the same code.
@@ -1149,10 +1151,11 @@ FLAC_NOINLINE void write_partitioned_fixed(BitWriterLocal& bw, const PackedSigna
 // ----------------------------------------------------------------------------
 //
 // Pass A picks the stereo assignment from the fixed predictors, and Pass B
-// tries LPC on the two subframes the frame carries. An attempt walks the
-// signal three times: the windowed autocorrelation, a residual magnitude sum
-// that prices the designed predictor in Pass A's terms (so
-// fixed_subframe_bits_bound()'s proof covers it), and, if LPC wins, emission.
+// tries LPC on the two subframes the frame carries (the stereo search below
+// tries all four). An attempt walks the signal three times: the windowed
+// autocorrelation, a residual magnitude sum that prices the designed
+// predictor in Pass A's terms (so fixed_subframe_bits_bound()'s proof covers
+// it), and, if LPC wins, emission.
 
 // How Pass B codes a frame's subframes. lpc_max_order 0 means no LPC. A
 // build without LPC or partitioning reads none of the fields it leaves out.
@@ -1161,6 +1164,9 @@ struct SubframeSettings {
     uint32_t lpc_precision;        // cppcheck-suppress unusedStructMember
     uint32_t max_partition_order;  // cppcheck-suppress unusedStructMember
 };
+
+// Pass B's signatures carry a design pointer in every build; only LPC defines it.
+struct LpcCandidate;
 
 #ifndef MICRO_FLAC_ENCODER_DISABLE_LPC  // LPC only
 
@@ -1401,12 +1407,13 @@ FLAC_NOINLINE void write_lpc_subframe(BitWriterLocal& bw, const PackedSignal& si
 
 // Write one subframe at depth bps: CONSTANT, the cheaper of FIXED (at its
 // best partitioning) and LPC, or VERBATIM when FIXED cannot be proven
-// smaller. LPC is designed here when enabled.
+// smaller. `designed` is the stereo search's LPC design for this signal, if
+// any; otherwise LPC is designed here when enabled.
 //
 // Out of line: encode_frame() calls it from three places.
 FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal, uint32_t bps,
-                                  const ChannelAnalysis& analysis,
-                                  const SubframeSettings& settings) {
+                                  const ChannelAnalysis& analysis, const SubframeSettings& settings,
+                                  const LpcCandidate* designed) {
     const uint8_t bps8 = static_cast<uint8_t>(bps);
 
     if (analysis.is_constant) {
@@ -1427,7 +1434,14 @@ FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal
 #endif
 
 #ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
-    if (settings.lpc_max_order != 0) {
+    if (designed != nullptr) {
+        // The search hands over only designs that beat unpartitioned FIXED,
+        // so without partitioning this folds away.
+        if (!FLACEncoder::RICE_PARTITIONS_AVAILABLE || designed->estimated_bits < fixed_bits) {
+            write_lpc_subframe(bw, signal, bps, *designed);
+            return;
+        }
+    } else if (settings.lpc_max_order != 0) {
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- design_lpc() sets it
         LpcCandidate candidate;
         if (design_lpc(signal, bps, settings, candidate) && candidate.estimated_bits < fixed_bits) {
@@ -1437,6 +1451,7 @@ FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal
     }
 #else
     (void)settings;
+    (void)designed;
     (void)fixed_bits;
 #endif
 
@@ -1465,6 +1480,142 @@ FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal
         emit_rice_codes(bw, r, m, k, capacity_proven);
     });
 }
+
+// ----------------------------------------------------------------------------
+// Stereo search (FLACEncoderOptions::lpc_stereo_search)
+// ----------------------------------------------------------------------------
+//
+// The assignment cheapest with fixed predictors is often not the one
+// cheapest with LPC. The search designs LPC for all four candidates, chooses
+// from each one's better estimate, and hands the chosen two designs to Pass
+// B, so only the unchosen two are extra work.
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+
+// The chosen subframes' LPC designs, in wire order, where LPC beats FIXED
+struct StereoLpc {
+    LpcCandidate candidate[2];
+    bool use[2];
+};
+
+// Choose the stereo assignment from each candidate's better estimate, FIXED
+// or LPC (arrays indexed by SignalId). The plan keeps the FIXED analyses,
+// which Pass B's size bound needs.
+StereoPlan choose_stereo_plan_with_lpc(const ChannelAnalysis (&analyses)[4],
+                                       const LpcCandidate (&designs)[4], const bool (&designed)[4],
+                                       uint32_t bps, StereoLpc& out) {
+    ChannelAnalysis priced[4];
+    for (uint32_t i = 0; i < 4; i++) {
+        priced[i] = analyses[i];
+        if (designed[i] && designs[i].estimated_bits < priced[i].estimated_bits) {
+            priced[i].estimated_bits = designs[i].estimated_bits;
+        }
+    }
+    StereoPlan plan = choose_stereo_plan(priced[0], priced[1], priced[2], priced[3], bps);
+    const uint32_t chosen[2] = {static_cast<uint32_t>(plan.sig0), static_cast<uint32_t>(plan.sig1)};
+    for (uint32_t k = 0; k < 2; k++) {
+        const uint32_t i = chosen[k];
+        out.use[k] = designed[i] && designs[i].estimated_bits < analyses[i].estimated_bits;
+        if (out.use[k]) {
+            out.candidate[k] = designs[i];
+        }
+    }
+    plan.analysis0 = analyses[chosen[0]];
+    plan.analysis1 = analyses[chosen[1]];
+    return plan;
+}
+
+// price_lpc() out of line, for the stereo search
+FLAC_NOINLINE bool price_lpc_alone(const PackedSignal& signal, uint32_t bps,
+                                   const SubframeSettings& settings, LpcCandidate& candidate) {
+    int32_t work[LPC_WORK_SAMPLES];
+    return price_lpc(signal, bps, settings, candidate, work);
+}
+
+// Design the four candidates from a finished joint autocorrelation, skipping
+// constant ones, which code as CONSTANT
+void design_stereo_candidates(LpcStereoAutocorrelation& st, const ChannelAnalysis (&analyses)[4],
+                              uint32_t bps, uint32_t precision, LpcCandidate (&designs)[4],
+                              bool (&designed)[4]) {
+    for (uint32_t i = 0; i < 2; i++) {
+        designed[i] = !analyses[i].is_constant && lpc_design((i == 0) ? st.left : st.right, bps,
+                                                             precision, designs[i].predictor);
+    }
+    // Mid's and side's autocorrelations replace left's and right's
+    lpc_stereo_autocorrelation_finish(st, st.left, st.right);
+    for (uint32_t i = 2; i < 4; i++) {
+        designed[i] = !analyses[i].is_constant &&
+                      lpc_design((i == 2) ? st.left : st.right, (i == 3) ? bps + 1 : bps, precision,
+                                 designs[i].predictor);
+    }
+}
+
+// The stereo search's walk 1, for all four candidates at once, unpacking
+// each chunk once as left and right. Out of line, so its stack is gone before
+// the pricing walks.
+FLAC_NOINLINE void design_stereo(const PackedSignal& base, const ChannelAnalysis (&analyses)[4],
+                                 uint32_t bps, bool wide, const SubframeSettings& settings,
+                                 LpcCandidate (&designs)[4], bool (&designed)[4]) {
+    const uint32_t n = base.n;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- set by its begin()
+    LpcStereoAutocorrelation st;
+    int32_t work_left[LPC_WORK_SAMPLES];
+    int32_t work_right[LPC_WORK_SAMPLES];
+    const uint32_t max_order = settings.lpc_max_order;
+    lpc_stereo_autocorrelation_begin(st, n, (max_order < n) ? max_order : (n - 1), bps, wide);
+    const size_t frame_bytes = static_cast<size_t>(base.bytes) * 2;
+    int32_t* const left = base.buf;
+    int32_t* const right = base.buf + base.chunk_len;
+    for (uint32_t start = 0; start < n; start += base.chunk_len) {
+        const uint32_t m = (n - start < base.chunk_len) ? (n - start) : base.chunk_len;
+        unpack_stereo(left, right, base.input + (start * frame_bytes), m, base.bps, base.bytes);
+        lpc_stereo_autocorrelation_update(st, left, right, m, work_left, work_right);
+    }
+    design_stereo_candidates(st, analyses, bps, settings.lpc_precision, designs, designed);
+}
+
+// The stereo search: one walk designs all four candidates, then each is
+// priced. Candidates are designed one by one instead of jointly when the
+// joint sums could overflow (a long wide block) or when any candidate has
+// wasted bits (`wasted` is indexed by SignalId).
+FLAC_NOINLINE StereoPlan search_stereo_lpc(const PackedSignal& base,
+                                           const ChannelAnalysis (&analyses)[4], uint32_t bps,
+                                           const SubframeSettings& settings,
+                                           const uint32_t (&wasted)[4], StereoLpc& out) {
+    LpcCandidate designs[4];
+    bool designed[4] = {false, false, false, false};
+    const SignalId ids[4] = {SignalId::LEFT, SignalId::RIGHT, SignalId::MID, SignalId::SIDE};
+    const uint32_t n = base.n;
+    const bool wide = deep_stream(base);
+    const bool joint = n >= 2 && (!wide || n <= LPC_STEREO_WIDE_MAX_SAMPLES) &&
+                       (wasted[0] | wasted[1] | wasted[2] | wasted[3]) == 0;
+    if (joint) {
+        design_stereo(base, analyses, bps, wide, settings, designs, designed);
+    }
+    for (uint32_t i = 0; i < 4; i++) {
+        PackedSignal signal = base;
+        signal.sig = ids[i];
+        signal.wasted = wasted[i];
+        const uint32_t signal_bps = ((ids[i] == SignalId::SIDE) ? bps + 1 : bps) - wasted[i];
+        if (joint) {
+            designed[i] = designed[i] && price_lpc_alone(signal, signal_bps, settings, designs[i]);
+        } else {
+            designed[i] =
+                !analyses[i].is_constant && design_lpc(signal, signal_bps, settings, designs[i]);
+        }
+    }
+    return choose_stereo_plan_with_lpc(analyses, designs, designed, bps, out);
+}
+
+// Subframe k's design from the search, or null where FIXED won. Either way
+// Pass B designs no LPC of its own.
+FLAC_ALWAYS_INLINE const LpcCandidate* searched_design(const StereoLpc& searched, uint32_t k,
+                                                       SubframeSettings& settings) {
+    settings.lpc_max_order = 0;
+    return searched.use[k] ? &searched.candidate[k] : nullptr;
+}
+
+#endif  // MICRO_FLAC_ENCODER_DISABLE_LPC
 
 // ============================================================================
 // Frame footer (RFC 9639 SS9.3)
@@ -1681,6 +1832,9 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     this->sample_rate_extra_len_ = 0;
     this->lpc_max_order_ = 0;
     this->lpc_precision_ = 0;
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+    this->lpc_stereo_search_ = false;
+#endif
     this->max_partition_order_ = 0;
 
     // Only validates and precomputes; config_result_ stays BAD_CONFIG unless
@@ -1718,6 +1872,7 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     if (options.lpc) {
         this->lpc_max_order_ = options.max_lpc_order;
         this->lpc_precision_ = static_cast<uint8_t>(lpc_precision(bits_per_sample, block_size));
+        this->lpc_stereo_search_ = options.lpc_stereo_search && (num_channels == 2);
     }
 #endif
 #ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
@@ -1864,7 +2019,7 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
             }
             const ChannelAnalysis analysis =
                 finish_wasted_analysis(scan, num_samples, bps, bits, signal.wasted);
-            write_subframe(bw, signal, bps - signal.wasted, analysis, settings);
+            write_subframe(bw, signal, bps - signal.wasted, analysis, settings, nullptr);
         }
 
         return this->finish_frame(close_frame(bw, output), num_samples, bytes_written);
@@ -1925,12 +2080,29 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     plan.sig1 = SignalId::RIGHT;
     plan.bps1 = bps;
     plan.analysis1 = analysis_r;
+    SubframeSettings settings0 = settings;
+    SubframeSettings settings1 = settings;
+    const LpcCandidate* designed0 = nullptr;
+    const LpcCandidate* designed1 = nullptr;
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- read only after the search sets it
+    StereoLpc searched;
+#endif
     if (estimate_stereo) {
         const ChannelAnalysis analysis_mid =
             finish_wasted_analysis(scan_mid, num_samples, bps, bits[2], wasted[2]);
         const ChannelAnalysis analysis_side =
             finish_wasted_analysis(scan_side, num_samples, side_bps, bits[3], wasted[3]);
         plan = choose_stereo_plan(analysis_l, analysis_r, analysis_mid, analysis_side, bps);
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+        if (this->lpc_stereo_search_) {
+            const ChannelAnalysis analyses[4] = {analysis_l, analysis_r, analysis_mid,
+                                                 analysis_side};
+            plan = search_stereo_lpc(base, analyses, bps, settings, wasted, searched);
+            designed0 = searched_design(searched, 0, settings0);
+            designed1 = searched_design(searched, 1, settings1);
+        }
+#endif
     }
 
     BitWriterLocal bw{};
@@ -1941,11 +2113,11 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     PackedSignal signal0 = base;
     signal0.sig = plan.sig0;
     signal0.wasted = wasted[static_cast<uint32_t>(plan.sig0)];
-    write_subframe(bw, signal0, plan.bps0 - signal0.wasted, plan.analysis0, settings);
+    write_subframe(bw, signal0, plan.bps0 - signal0.wasted, plan.analysis0, settings0, designed0);
     PackedSignal signal1 = base;
     signal1.sig = plan.sig1;
     signal1.wasted = wasted[static_cast<uint32_t>(plan.sig1)];
-    write_subframe(bw, signal1, plan.bps1 - signal1.wasted, plan.analysis1, settings);
+    write_subframe(bw, signal1, plan.bps1 - signal1.wasted, plan.analysis1, settings1, designed1);
 
     return this->finish_frame(close_frame(bw, output), num_samples, bytes_written);
 }

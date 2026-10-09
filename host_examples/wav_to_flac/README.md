@@ -42,7 +42,7 @@ cmake --build build
 ## Usage
 
 ```bash
-./build/wav_to_flac [--block-size N] [--lpc] [--lpc-order N] [--partition-order N] [--no-wasted-bits] <input.wav> <output.flac>
+./build/wav_to_flac [--block-size N] [--lpc] [--lpc-order N] [--lpc-stereo-search] [--partition-order N] [--no-wasted-bits] <input.wav> <output.flac>
 ```
 
 ### Flags
@@ -52,6 +52,7 @@ cmake --build build
 | `--block-size N` | Samples per channel in every frame but the last, 16-65535 (default: 4096) |
 | `--lpc` | Also try linear prediction (LPC) on every subframe, at the default maximum order of 8 |
 | `--lpc-order N` | Highest LPC order tried, 1-12. Implies `--lpc` |
+| `--lpc-stereo-search` | Design LPC for all four stereo candidates (left, right, mid, side) before choosing the channel assignment. Implies `--lpc` |
 | `--partition-order N` | Largest Rice partition order tried, 0-6 (default 0, one partition per subframe) |
 | `--no-wasted-bits` | Turn off wasted-bits detection (`FLACEncoderOptions::wasted_bits`) |
 
@@ -60,6 +61,7 @@ cmake --build build
 ```bash
 ./build/wav_to_flac song.wav song.flac
 ./build/wav_to_flac --lpc song.wav song.flac   # about 7-9% smaller on typical music
+./build/wav_to_flac --lpc-stereo-search --partition-order 6 song.wav song.flac   # within 0.01% of flac -5
 ```
 
 WAV data is already in the encoder's packed byte layout, so the program reads one block at a time straight into `encode()` and passes the short remainder to `finish()`. It then seeks back and rewrites the stream header, so STREAMINFO carries the total sample count, the frame size range and the MD5 signature. The library leaves the MD5 to its caller; the program computes it with the `md5.h` it shares with `flac_to_wav`. It prints encode stats and, for stereo input, how many frames used each channel assignment.

@@ -69,7 +69,7 @@ menu "microFLAC"
         default y
         help
             Compile in FLACEncoder's opt-in linear prediction
-            (FLACEncoderOptions::lpc, max_lpc_order), which
+            (FLACEncoderOptions::lpc, max_lpc_order, lpc_stereo_search), which
             makes 16-bit music about 7-9% smaller at roughly 2.4x the encode
             time. LPC is off at run time by default either way. Streams of
             17-24 bits take 64-bit arithmetic, which Xtensa builds from 32-bit

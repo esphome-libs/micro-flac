@@ -96,6 +96,12 @@ struct FLACEncoderOptions {
     /// `lpc` is set.
     uint8_t max_lpc_order{8};
 
+    /// With `lpc` on a stereo stream, design LPC for all four candidate
+    /// signals (left, right, mid, side) before choosing the channel
+    /// assignment, instead of choosing from the fixed predictors. About
+    /// 0.05-0.25% smaller, for about 40% more encode time on an ESP32-S3.
+    bool lpc_stereo_search{false};
+
     /// Largest Rice partition order tried, in [0,
     /// FLACEncoder::MAX_RICE_PARTITION_ORDER]; 0 codes each subframe with one
     /// Rice parameter. Partitioning (RFC 9639 SS9.2.7) gives each of up to
@@ -133,7 +139,7 @@ struct FLACEncoderOptions {
  *          thread.
  *
  * @note The encoder never allocates; its working memory is the object itself
- *       (about 2.1 KB), plus up to about 3.4 KB of task stack inside
+ *       (about 2.1 KB), plus up to about 4.3 KB of task stack inside
  *       encode() and finish(). The constructor always succeeds, and an
  *       unsupported configuration is reported by the first write_header(),
  *       encode() or finish() call as FLAC_ENCODER_ERROR_BAD_CONFIG. To
@@ -481,11 +487,14 @@ private:
     // 8-bit fields
     FLACEncoderResult config_result_{FLAC_ENCODER_ERROR_BAD_CONFIG};  // configure()'s verdict
     uint8_t bits_per_sample_code_{0};                                 // Frame header bit-depth code
-    uint8_t sample_rate_code_{0};           // Frame header sample-rate code
-    uint8_t sample_rate_extra_[2]{};        // Its extra bytes, big-endian
-    uint8_t sample_rate_extra_len_{0};      // 0, 1, or 2
-    uint8_t lpc_max_order_{0};              // Highest LPC order tried; 0 when LPC does not apply
-    uint8_t lpc_precision_{0};              // LPC coefficient precision to aim for
+    uint8_t sample_rate_code_{0};       // Frame header sample-rate code
+    uint8_t sample_rate_extra_[2]{};    // Its extra bytes, big-endian
+    uint8_t sample_rate_extra_len_{0};  // 0, 1, or 2
+    uint8_t lpc_max_order_{0};          // Highest LPC order tried; 0 when LPC does not apply
+    uint8_t lpc_precision_{0};          // LPC coefficient precision to aim for
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+    bool lpc_stereo_search_{false};  // FLACEncoderOptions::lpc_stereo_search, where it applies
+#endif
     uint8_t max_partition_order_{0};        // Largest Rice partition order tried; 0 when off
     bool finished_{false};                  // Whether finish() has ended this stream
     bool stereo_estimation_enabled_{true};  // false forces independent stereo; set only by

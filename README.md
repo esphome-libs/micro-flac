@@ -23,10 +23,10 @@ A FLAC (Free Lossless Audio Codec) decoder and encoder optimized for ESP32 embed
 
 - **4-24 bit PCM input, 1-8 channels**: Packed interleaved bytes in exactly the layout the decoder outputs (`PcmFormat`)
 - **Fixed predictors, plus opt-in LPC**: Fixed predictors (orders 0-4) always; linear prediction up to order 12 on request, typically 7-9% smaller on music. All integer arithmetic, so output is identical on every platform
-- **Opt-in Rice partitioning**: Each subframe's residuals split into up to 64 partitions with their own Rice parameters, about 1% smaller at large blocks
+- **Opt-in Rice partitioning and LPC stereo search**: With both and LPC order 8, output is within 0.01% of reference `flac -5`
 - **Stereo decorrelation**: Each frame takes the cheapest of the four channel assignments
 - **Wasted-bits detection**: 16-bit audio in a 24-bit stream codes nearly as small as a 16-bit stream
-- **No buffering, no allocation**: `encode()` reads one block straight from the caller's buffer; all working memory is the ~2.1 KB object plus up to ~3.4 KB of task stack
+- **No buffering, no allocation**: `encode()` reads one block straight from the caller's buffer; all working memory is the ~2.1 KB object plus up to ~4.3 KB of task stack
 - **Finished stream header**: After `finish()`, a same-size header carrying the total sample count and frame-size range can overwrite the first
 
 ## Quick Start
@@ -222,6 +222,7 @@ Available after `decode()` returns `FLAC_DECODER_HEADER_READY` via `decoder.get_
   - `block_size` (16-65535, default 4096).
   - `lpc` (default off): also try linear prediction on each subframe, keeping it where it is estimated smaller. Typically 7-9% smaller on 16-bit music. Streams of 17-24 bits use 64-bit arithmetic, much slower on an ESP32.
   - `max_lpc_order` (1-12, default 8): the highest LPC order tried. Orders 4, 8 and 12 come out about 6.8%, 8.6% and 9% smaller than the fixed predictors alone.
+  - `lpc_stereo_search` (default off): with `lpc` on stereo, choose each frame's channel assignment after designing LPC for all four candidates (left, right, mid, side) rather than from the fixed predictors. 0.05-0.25% smaller.
   - `max_rice_partition_order` (0-6, default 0): split each subframe's residuals into up to 2^order partitions with their own Rice parameters. About 1% smaller at block size 4096, 0.3% at 1152.
   - `wasted_bits` (default on): code a subframe whose samples all end in the same k zero bits k bits shallower (RFC 9639 §9.2.2), as with 16-bit audio in a 24-bit stream.
 
@@ -292,7 +293,7 @@ ESP32-S3 and ESP32-P4 numbers are measured with the working buffer in PSRAM (the
 | Block samples buffer | `max_block_size × channels × 4` | Typically 16-64KB |
 | Metadata blocks | Variable | Configurable per type |
 | Output buffer | `max_block_size × channels × bytes_per_sample` | Allocated by user |
-| Encoder object | ~2.1 KB | Stack or heap. `encode()` itself needs up to about 1.6 KB of task stack, 2.3 KB with partitioning, or 3.4 KB with LPC |
+| Encoder object | ~2.1 KB | Stack or heap. `encode()` itself needs up to about 1.6 KB of task stack, 2.3 KB with partitioning, 3.4 KB with LPC, or 4.3 KB with the stereo search |
 | Encoder output buffer | `get_max_output_bytes()` | Allocated by user; fits one worst-case frame |
 | Encoder input | One block (`get_input_block_bytes()`) | The caller's buffer, unpacked a chunk at a time |
 
