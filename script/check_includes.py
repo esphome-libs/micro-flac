@@ -91,6 +91,9 @@ HEADER_EXTS = {".h", ".hpp"}
 # dir at startup; only the data module is checked in.
 STUB_DIR = os.path.join(BUILD_DIR, "esp_stubs")
 
+# Set in main() from macos_sysroot_args().
+SYSROOT_ARGS = []
+
 # ------------------------------------------------------------------------------
 
 CHANGE_RE = re.compile(r"^([+-])\s+(.+?)(?:\s+@Line:(\d+))?$")
@@ -199,6 +202,20 @@ def direct_includes(path):
         return set()
 
 
+def macos_sysroot_args():
+    """On macOS, a non-Apple clang (Homebrew LLVM) can't locate the SDK on its
+    own, and the compile db has no -isysroot because Apple's driver finds it
+    implicitly, so every standard header fails to resolve. Pass the active SDK."""
+    if sys.platform != "darwin":
+        return []
+    try:
+        sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True,
+                             text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return [f"-isysroot{sdk}"] if sdk else []
+
+
 def run_engine(binary, path, esp_pass, fix_removals=False):
     """Run one file through clang-include-cleaner. Returns (inserts, removes,
     error). inserts/removes are lists of display strings."""
@@ -209,7 +226,7 @@ def run_engine(binary, path, esp_pass, fix_removals=False):
         cmd += ["--print=changes"]
     for d in EXTRA_INCLUDE_DIRS:
         cmd.append(f"--extra-arg=-I{os.path.join(ROOT, d)}")
-    for arg in EXTRA_CLANG_ARGS:
+    for arg in EXTRA_CLANG_ARGS + SYSROOT_ARGS:
         cmd.append(f"--extra-arg={arg}")
     if esp_pass:
         cmd += ["--extra-arg=-DESP_PLATFORM", f"--extra-arg=-isystem{STUB_DIR}"]
@@ -249,7 +266,9 @@ def main():
     parser.add_argument("--fix", action="store_true", help="apply removals in place")
     args = parser.parse_args()
 
+    global SYSROOT_ARGS
     binary = find_binary()
+    SYSROOT_ARGS = macos_sysroot_args()
     ensure_compile_db()
     materialize_stubs()
 
