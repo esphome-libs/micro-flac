@@ -19,6 +19,7 @@
 #include "compiler.h"
 #include "crc.h"
 #include "decorrelation.h"
+#include "flac_format.h"
 #include "frame_header.h"
 #include "lpc.h"
 #include "pcm_packing.h"
@@ -32,29 +33,6 @@
 #include <type_traits>
 
 namespace micro_flac {
-
-static constexpr uint8_t MAGIC_BYTES[] = {'f', 'L', 'a', 'C'};
-
-// FLAC subframe type ranges (RFC 9639 Section 9.2.1)
-static constexpr uint8_t SUBFRAME_FIXED_MAX = 12;
-static constexpr uint8_t SUBFRAME_LPC_MIN = 32;
-static constexpr uint8_t SUBFRAME_LPC_MAX = 63;
-
-// Fixed prediction coefficients for orders 0-4
-// Order 0: no coefficients
-// Order 1: [1]
-// Order 2: [-1, 2]
-// Order 3: [1, -3, 3]
-// Order 4: [-1, 4, -6, 4]
-static constexpr int16_t FIXED_COEFFICIENTS_1[] = {1};
-static constexpr int16_t FIXED_COEFFICIENTS_2[] = {-1, 2};
-static constexpr int16_t FIXED_COEFFICIENTS_3[] = {1, -3, 3};
-static constexpr int16_t FIXED_COEFFICIENTS_4[] = {-1, 4, -6, 4};
-
-// Index 0 is nullptr (order 0 has no coefficients; the LPC loop iterates 0 times)
-static constexpr const int16_t* FIXED_COEFFICIENTS[] = {nullptr, FIXED_COEFFICIENTS_1,
-                                                        FIXED_COEFFICIENTS_2, FIXED_COEFFICIENTS_3,
-                                                        FIXED_COEFFICIENTS_4};
 
 // The bit-reader primitives (BitReaderLocal, refill_bit_buffer_local,
 // read_uint_local, read_rice_sint_local) live in bit_reader.h.
@@ -441,10 +419,6 @@ FLACDecoderResult FLACDecoder::decode_ogg(const uint8_t* input, size_t input_len
         }
     }
 
-    // Expected BOS prefix: 0x7F 'F' 'L' 'A' 'C' 0x01 <minor> <num_header_packets(2)>
-    static constexpr uint8_t BOS_PREFIX[] = {0x7F, 'F', 'L', 'A', 'C', 0x01};
-    static constexpr uint8_t BOS_PREFIX_LEN = 9;
-
     // This loop is bounded by input_len: each iteration either advances bytes_consumed
     // (via demuxer consumption) or returns NEED_MORE_DATA when bytes_consumed >= input_len.
     // Malformed files with many tiny Ogg pages may cause many iterations per call, but
@@ -484,9 +458,9 @@ FLACDecoderResult FLACDecoder::decode_ogg(const uint8_t* input, size_t input_len
 
         // Step 2: Strip 9-byte BOS prefix byte-by-byte (streaming safe)
         if (!this->ogg_bos_processed_) {
-            while (this->ogg_bos_prefix_consumed_ < BOS_PREFIX_LEN && body_len > 0) {
+            while (this->ogg_bos_prefix_consumed_ < OGG_BOS_HEADER_LENGTH && body_len > 0) {
                 uint8_t idx = this->ogg_bos_prefix_consumed_;
-                if (idx < 6 && body[0] != BOS_PREFIX[idx]) {
+                if (idx < sizeof(OGG_BOS_PREFIX) && body[0] != OGG_BOS_PREFIX[idx]) {
                     return this->set_fatal_error(FLAC_DECODER_ERROR_OGG_BAD_HEADER);
                 }
                 this->ogg_bos_prefix_consumed_++;
@@ -494,7 +468,7 @@ FLACDecoderResult FLACDecoder::decode_ogg(const uint8_t* input, size_t input_len
                 body_len--;
             }
 
-            if (this->ogg_bos_prefix_consumed_ < BOS_PREFIX_LEN) {
+            if (this->ogg_bos_prefix_consumed_ < OGG_BOS_HEADER_LENGTH) {
                 continue;
             }
             this->ogg_bos_processed_ = true;
@@ -542,6 +516,8 @@ FLACDecoderResult FLACDecoder::decode_ogg(const uint8_t* input, size_t input_len
 
 FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_length,
                                            size_t& bytes_consumed) {
+    static_assert(FLACStreamInfo::RAW_SIZE == STREAMINFO_SIZE, "STREAMINFO size mismatch");
+
     size_t pos = 0;
     size_t remaining = buffer_length;
     bytes_consumed = 0;
@@ -1138,21 +1114,21 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
                 }
                 this->subframe_.bits_per_sample = bits_per_sample - this->subframe_.shift;
 
-                if (this->subframe_.type == 0) {
+                if (this->subframe_.type == SUBFRAME_TYPE_CONSTANT) {
                     this->subframe_.stage = SubframeDecodeStage::SUBFRAME_CONSTANT;
-                } else if (this->subframe_.type == 1) {
+                } else if (this->subframe_.type == SUBFRAME_TYPE_VERBATIM) {
                     this->subframe_.stage = SubframeDecodeStage::SUBFRAME_VERBATIM;
-                } else if (this->subframe_.type >= 8 &&
-                           this->subframe_.type <= SUBFRAME_FIXED_MAX) {
-                    this->lpc_.order = this->subframe_.type - 8;
+                } else if (this->subframe_.type >= SUBFRAME_TYPE_FIXED_MIN &&
+                           this->subframe_.type <= SUBFRAME_TYPE_FIXED_MAX) {
+                    this->lpc_.order = this->subframe_.type - SUBFRAME_TYPE_FIXED_MIN;
                     if (this->lpc_.order >= block_size) {
                         return FLAC_DECODER_ERROR_BAD_LPC_PARAMS;
                     }
                     this->subframe_.sample_idx = 0;
                     this->subframe_.stage = SubframeDecodeStage::SUBFRAME_WARMUP;
-                } else if (this->subframe_.type >= SUBFRAME_LPC_MIN &&
-                           this->subframe_.type <= SUBFRAME_LPC_MAX) {
-                    this->lpc_.order = this->subframe_.type - (SUBFRAME_LPC_MIN - 1);
+                } else if (this->subframe_.type >= SUBFRAME_TYPE_LPC_MIN &&
+                           this->subframe_.type <= SUBFRAME_TYPE_LPC_MAX) {
+                    this->lpc_.order = this->subframe_.type - (SUBFRAME_TYPE_LPC_MIN - 1);
                     if (this->lpc_.order >= block_size) {
                         return FLAC_DECODER_ERROR_BAD_LPC_PARAMS;
                     }
@@ -1210,8 +1186,8 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
                 }
                 this->subframe_.sample_idx = 0;
 
-                if (this->subframe_.type >= SUBFRAME_LPC_MIN &&
-                    this->subframe_.type <= SUBFRAME_LPC_MAX) {
+                if (this->subframe_.type >= SUBFRAME_TYPE_LPC_MIN &&
+                    this->subframe_.type <= SUBFRAME_TYPE_LPC_MAX) {
                     this->lpc_.precision = 0;
                     this->subframe_.stage = SubframeDecodeStage::LPC_PARAMS;
                 } else {
@@ -1281,7 +1257,8 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframe_impl(uint32_t block_size
 
                 const int16_t* coefs = nullptr;
                 int32_t shift = 0;
-                if (this->subframe_.type >= 8 && this->subframe_.type <= SUBFRAME_FIXED_MAX) {
+                if (this->subframe_.type >= SUBFRAME_TYPE_FIXED_MIN &&
+                    this->subframe_.type <= SUBFRAME_TYPE_FIXED_MAX) {
                     coefs = FIXED_COEFFICIENTS[this->lpc_.order];
                     shift = 0;
                 } else {

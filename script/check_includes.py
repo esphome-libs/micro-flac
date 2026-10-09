@@ -61,7 +61,9 @@ CHECK_BOTH = ["src", "include"]
 CHECK_HOST_ONLY = ["host_examples"]
 CHECK_ESP_ONLY = ["examples"]
 
-# Skip paths containing any of these segments (build trees, vendored code).
+# Skip paths containing any of these segments (build trees, vendored code),
+# and any segment starting with "build-" (variant build trees, as .gitignore
+# ignores them).
 EXCLUDE_SEGMENTS = {"build", ".pio", "managed_components", "cmake-build"}
 # Skip these repo-relative directories entirely.
 # test_lpc_asm calls Xtensa assembly routines whose declarations are gated on
@@ -170,6 +172,7 @@ def gather_files(dirs, prune=()):
             dirnames[:] = [
                 n for n in dirnames
                 if n not in EXCLUDE_SEGMENTS
+                and not n.startswith("build-")
                 and os.path.join(dirpath, n) not in exclude_dirs
             ]
             for name in sorted(filenames):

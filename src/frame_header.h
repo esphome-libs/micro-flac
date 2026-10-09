@@ -33,10 +33,7 @@ struct FrameHeaderInfo {
     uint32_t bits_per_sample{0};
 };
 
-// Minimum valid frame header length (sync + block/rate + channel/bps + utf8 + crc8)
-static constexpr uint8_t FRAME_HEADER_MIN_LENGTH = 6;
-
-/// @brief Compute the exact frame header length from the first 5 accumulated bytes.
+/// @brief Compute the exact frame header length from the first 5 accumulated bytes
 ///
 /// FLAC frame headers are 6-16 bytes. After 5 bytes, the remaining length is deterministic.
 /// Layout: sync(2) + block_size/sample_rate(1) + channel/depth(1) + utf8(1-7) +

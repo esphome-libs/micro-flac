@@ -43,10 +43,11 @@ if [ ! -f "${BUILD_DIR}/compile_commands.json" ]; then
     cmake -B "$BUILD_DIR" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "${ROOT_DIR}/host_examples/flac_to_wav"
 fi
 
-# Find all source files, excluding build/ directories
+# Find all source files, excluding build/ and build-*/ directories (variant
+# build trees, as .gitignore ignores them)
 # Note: examples/ excluded as ESP-IDF code can't be checked without ESP-IDF headers
 SOURCES=$(find "$ROOT_DIR/src" "$ROOT_DIR/host_examples" \
-    -path '*/build' -prune -o \
+    -type d \( -path '*/build' -o -path '*/build-*' \) -prune -o \
     \( -name '*.cpp' -o -name '*.c' \) -print 2>/dev/null || true)
 
 if [ -z "$SOURCES" ]; then

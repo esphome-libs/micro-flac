@@ -15,15 +15,9 @@
 #include "frame_header.h"
 
 #include "crc.h"
-#include "decorrelation.h"
+#include "flac_format.h"
 
 namespace micro_flac {
-
-// FLAC sample rate codes that require extra header bytes (RFC 9639 Section 9.1.2)
-static constexpr uint8_t SAMPLE_RATE_TABLE_MAX = 11;
-static constexpr uint8_t SAMPLE_RATE_CODE_KHZ_1BYTE = 12;
-static constexpr uint8_t SAMPLE_RATE_CODE_HZ_2BYTE = 13;
-static constexpr uint8_t SAMPLE_RATE_CODE_TENS_HZ_2BYTE = 14;
 
 namespace {
 
@@ -66,9 +60,9 @@ FrameHeaderLayout compute_layout(const uint8_t* header) {
 
     // Block size extra bytes from block_size_code (upper nibble of byte[2])
     uint8_t block_size_code = header[2] >> 4;
-    if (block_size_code == 6) {
+    if (block_size_code == BLOCK_SIZE_CODE_8BIT) {
         layout.block_size_extra = 1;
-    } else if (block_size_code == 7) {
+    } else if (block_size_code == BLOCK_SIZE_CODE_16BIT) {
         layout.block_size_extra = 2;
     }
 
@@ -113,13 +107,11 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
     }
 
     // 9.1.1 Block size bits
-    static constexpr uint16_t BLOCK_SIZE_TABLE[] = {0,   192, 576,  1152, 2304, 4608, 0,     0,
-                                                    256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
     uint8_t block_size_code = header[2] >> 4;
     if (block_size_code == 0) {
         return FLAC_DECODER_ERROR_BAD_BLOCK_SIZE;
     }
-    if (block_size_code != 6 && block_size_code != 7) {
+    if (block_size_code != BLOCK_SIZE_CODE_8BIT && block_size_code != BLOCK_SIZE_CODE_16BIT) {
         info.block_size = BLOCK_SIZE_TABLE[block_size_code];
     }
 
@@ -135,7 +127,6 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
     info.channel_assignment = header[3] >> 4;
 
     // 9.1.4 Bit depth bits
-    static constexpr uint8_t BPS_TABLE[] = {0, 8, 12, 0, 16, 20, 24, 32};
     uint8_t bits_per_sample_code = (header[3] & 0x0E) >> 1;  // NOLINT(readability-magic-numbers)
     if (bits_per_sample_code == 0) {
         info.bits_per_sample = stream_info.bits_per_sample();
@@ -169,18 +160,16 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
     }
 
     // 9.1.6 Uncommon block size
-    if (block_size_code == 6) {
+    if (block_size_code == BLOCK_SIZE_CODE_8BIT) {
         info.block_size = header[extra_idx] + 1;
         extra_idx += 1;
-    } else if (block_size_code == 7) {
+    } else if (block_size_code == BLOCK_SIZE_CODE_16BIT) {
         info.block_size = (static_cast<uint32_t>(header[extra_idx]) << 8) | header[extra_idx + 1];
         info.block_size += 1;
         extra_idx += 2;
     }
 
     // 9.1.7 Uncommon sample rate
-    static constexpr uint32_t SAMPLE_RATE_TABLE[] = {88200, 176400, 192000, 8000,  16000, 22050,
-                                                     24000, 32000,  44100,  48000, 96000};
     uint32_t frame_sample_rate = 0;
     if (sample_rate_code >= 1 && sample_rate_code <= SAMPLE_RATE_TABLE_MAX) {
         frame_sample_rate = SAMPLE_RATE_TABLE[sample_rate_code - 1];

@@ -3,6 +3,7 @@
 
 # Build artifacts
 build/
+build-*/
 *.o
 *.a
 *.so
@@ -91,9 +92,9 @@ examples/*/sdkconfig.*
 
 # Host example build files
 host_examples/*/build/
-host_examples/*/build-*/
 
 # Benchmark/test data
+test/
 *.tar.gz
 *.tar
 *.zip
@@ -114,9 +115,6 @@ htmlcov/
 
 # Fuzzing
 corpus/
-tests/fuzz/build-libfuzzer/
-tests/fuzz/build-standalone/
-tests/fuzz/build-cov/
 tests/fuzz/seeds_flac/
 tests/fuzz/corpus_flac/
 tests/fuzz/cov-html/

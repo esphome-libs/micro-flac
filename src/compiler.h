@@ -20,8 +20,7 @@
 
 #pragma once
 
-// Define optimization attribute for GCC/ESP32 builds
-// This ensures PlatformIO builds get O3 optimization for critical functions
+// O3 for critical functions in GCC builds, whatever the project's level
 #if defined(__GNUC__) && !defined(__clang__)
 #define FLAC_OPTIMIZE_O3 __attribute__((optimize("O3")))
 #else
@@ -69,7 +68,7 @@
 // branches and tighten codegen on the hot path. Clang has `__builtin_assume`;
 // GCC lacks a direct equivalent, so fall back to the
 // `if (!x) __builtin_unreachable();` idiom (which evaluates `x`, unlike
-// __builtin_assume — keep `x` side-effect free).
+// __builtin_assume, so keep `x` side-effect free).
 #if defined(__clang__)
 #define FLAC_ASSUME(x) __builtin_assume(x)
 #elif defined(__GNUC__)
