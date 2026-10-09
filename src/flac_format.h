@@ -93,9 +93,11 @@ static constexpr uint32_t SAMPLE_RATE_MAX = 0xFFFFF;
 /// @brief Largest number of channels a stream can carry (Section 9.1.3)
 static constexpr uint32_t MAX_CHANNELS = 8;
 
+/// @brief Two channels coded independently: code 1 of the 0-7 range, which
+/// means that many channels plus one (Section 9.1.3)
+static constexpr uint32_t CHANNEL_INDEPENDENT_STEREO = 1;
+
 /// @brief Joint stereo channel assignment codes (Section 9.1.3)
-///
-/// Codes 0-7 mean that many channels plus one, each coded independently.
 static constexpr uint32_t CHANNEL_LEFT_SIDE = 8;
 static constexpr uint32_t CHANNEL_RIGHT_SIDE = 9;
 static constexpr uint32_t CHANNEL_MID_SIDE = 10;

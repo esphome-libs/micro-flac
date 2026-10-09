@@ -496,7 +496,7 @@ StereoPlan choose_stereo_plan(const ChannelAnalysis& analysis_l, const ChannelAn
     const uint32_t side_bps = bps + 1;
 
     StereoPlan plan{};
-    plan.channel_assignment = 1;  // Independent stereo
+    plan.channel_assignment = static_cast<uint8_t>(CHANNEL_INDEPENDENT_STEREO);
     plan.sig0 = SignalId::LEFT;
     plan.bps0 = bps;
     plan.analysis0 = analysis_l;
@@ -1284,7 +1284,7 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     const ChannelAnalysis analysis_r =
         finish_wasted_analysis(scan_r, num_samples, bps, bits[1], wasted[1]);
     StereoPlan plan{};
-    plan.channel_assignment = 1;  // Independent stereo (num_channels - 1)
+    plan.channel_assignment = static_cast<uint8_t>(CHANNEL_INDEPENDENT_STEREO);
     plan.sig0 = SignalId::LEFT;
     plan.bps0 = bps;
     plan.analysis0 = analysis_l;
