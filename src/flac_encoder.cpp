@@ -874,6 +874,19 @@ FLAC_NOINLINE size_t close_frame(BitWriterLocal& bw, const uint8_t* frame_start)
 }  // namespace
 
 // ============================================================================
+// FLACEncoder: Constants
+// ============================================================================
+
+#if __cplusplus < 201703L
+// C++14 needs a definition for a static constexpr member a caller ODR-uses
+// (binding it to a reference, as std::min() and std::max() do); C++17 makes
+// them inline
+constexpr size_t FLACEncoder::HEADER_BYTES;
+constexpr uint32_t FLACEncoder::MIN_BLOCK_SIZE;
+constexpr uint32_t FLACEncoder::MAX_BLOCK_SIZE;
+#endif
+
+// ============================================================================
 // FLACEncoder: Lifecycle
 // ============================================================================
 
