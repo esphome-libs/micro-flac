@@ -19,6 +19,15 @@ cmake -B build && cmake --build build
 cmake -DENABLE_SANITIZERS=ON -B build && cmake --build build
 ```
 
+```bash
+cd host_examples/wav_to_flac
+cmake -B build && cmake --build build
+./build/wav_to_flac input.wav output.flac
+
+# With sanitizers (recommended for development)
+cmake -DENABLE_SANITIZERS=ON -B build && cmake --build build
+```
+
 ### ESP32 Build (PlatformIO)
 
 ```bash
@@ -45,6 +54,15 @@ cd tests/encoder
 cmake -B build && cmake --build build
 ./build/test_bit_writer                                 # Bit writer unit test (assert-based)
 ./build/test_encoder_config                             # Encoder config/argument validation unit test
+```
+
+```bash
+cd host_examples/wav_to_flac
+cmake -B build && cmake --build build
+python3 test_flac_encoder.py                            # Encoder round-trip/reference test suite
+python3 test_flac_encoder.py --block-sizes 16,192,4096   # Custom block sizes
+python3 test_flac_encoder.py --skip-real-audio           # Synthetic sources only, no test corpus decode
+python3 test_flac_encoder.py --skip-depth-channel        # Skip the 8/24-bit and 3-8 channel matrix
 ```
 
 ## Key Architecture Decisions
@@ -91,10 +109,14 @@ cmake -B build && cmake --build build
    pio run -e esp32s3 -t upload -t monitor
    ```
 
-3. **Encoder unit tests**:
+3. **Encoder host tests**:
 
    ```bash
-   cd tests/encoder                 # Unit tests (sanitizers on by default)
+   cd host_examples/wav_to_flac
+   cmake -DENABLE_SANITIZERS=ON -B build && cmake --build build
+   python3 test_flac_encoder.py     # Round-trip/reference test suite
+
+   cd ../../tests/encoder           # Unit tests (sanitizers on by default)
    cmake -B build && cmake --build build
    ./build/test_bit_writer          # Bit writer unit test
    ./build/test_encoder_config      # Encoder config/argument validation unit test

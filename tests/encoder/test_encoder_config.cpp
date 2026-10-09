@@ -15,7 +15,8 @@
 /// @file test_encoder_config.cpp
 /// @brief Unit test for FLACEncoder's API contract, validation, and odd depths
 ///
-/// Covers:
+/// Covers what test_flac_encoder.py cannot reach, because that suite only
+/// ever drives the encoder through wav_to_flac with valid WAV input:
 ///
 /// 1. The result codes every call returns for unsupported configurations and
 ///    bad arguments, and the encode()/finish()/write_header()/reset() stream
@@ -28,9 +29,12 @@
 ///    of the public header.
 /// 3. Round-trip fidelity at bit depths a WAV file cannot carry. WAV stores
 ///    only whole-byte sample widths, so depths like 12, 17 and 20 are
-///    unreachable through WAV files even though the format and this encoder
+///    unreachable through the CLI even though the format and this encoder
 ///    both support them. These are encoded and decoded entirely in memory,
 ///    and the decoder's byte output must equal the encoder's byte input.
+///
+/// Bit-exactness at 8, 16 and 24 bits across the block-size and channel-count
+/// matrix is test_flac_encoder.py's job, not this file's.
 ///
 /// Build/run (from tests/encoder):
 ///   cmake -B build && cmake --build build

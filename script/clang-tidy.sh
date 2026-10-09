@@ -8,6 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${ROOT_DIR}/host_examples/flac_to_wav/build"
+WAV_TO_FLAC_BUILD_DIR="${ROOT_DIR}/host_examples/wav_to_flac/build"
 ENCODER_TESTS_BUILD_DIR="${ROOT_DIR}/tests/encoder/build"
 
 # Find clang-tidy. A pre-set $CLANG_TIDY (CI pins it to clang-tidy-18) wins over PATH discovery.
@@ -39,12 +40,16 @@ if ! command -v "$CLANG_TIDY" &> /dev/null; then
 fi
 
 # Ensure compile_commands.json exists for each project. Each only knows the
-# compile flags for its own sources (flac_to_wav.cpp or the encoder unit
-# tests) plus the shared src/ library, so both databases are needed and merged
-# below.
+# compile flags for its own sources (flac_to_wav.cpp, wav_to_flac.cpp, or the
+# encoder unit tests) plus the shared src/ library, so all three databases are
+# needed and merged below.
 if [ ! -f "${BUILD_DIR}/compile_commands.json" ]; then
     echo "Generating compile_commands.json (flac_to_wav)..."
     cmake -B "$BUILD_DIR" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "${ROOT_DIR}/host_examples/flac_to_wav"
+fi
+if [ ! -f "${WAV_TO_FLAC_BUILD_DIR}/compile_commands.json" ]; then
+    echo "Generating compile_commands.json (wav_to_flac)..."
+    cmake -B "$WAV_TO_FLAC_BUILD_DIR" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "${ROOT_DIR}/host_examples/wav_to_flac"
 fi
 if [ ! -f "${ENCODER_TESTS_BUILD_DIR}/compile_commands.json" ]; then
     echo "Generating compile_commands.json (encoder tests)..."
@@ -75,7 +80,8 @@ for path in sys.argv[1:]:
 
 with open('$MERGED_DIR/compile_commands.json', 'w') as f:
     json.dump(entries, f, indent=2)
-" "${BUILD_DIR}/compile_commands.json" "${ENCODER_TESTS_BUILD_DIR}/compile_commands.json"
+" "${BUILD_DIR}/compile_commands.json" "${WAV_TO_FLAC_BUILD_DIR}/compile_commands.json" \
+    "${ENCODER_TESTS_BUILD_DIR}/compile_commands.json"
 
 # Find all source files, excluding build/ and build-*/ directories (variant
 # build trees, as .gitignore ignores them)

@@ -200,6 +200,51 @@ jobs:
       - name: Run tests
         run: python3 host_examples/flac_to_wav/test_flac_decoder.py --categories subset --build-dir build ${{ matrix.args }}
 
+  # The encoder's round trips: every encode decodes back bit-exactly.
+  encoder-test:
+    name: "Test: FLAC encode"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Get test files latest commit
+        id: test-files-ref
+        run: echo "sha=$(git ls-remote https://github.com/ietf-wg-cellar/flac-test-files.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache test files
+        id: cache-test-files
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: test/flac-test-files
+          key: flac-test-files-${{ steps.test-files-ref.outputs.sha }}
+
+      - name: Clone test files
+        if: steps.cache-test-files.outputs.cache-hit != 'true'
+        run: git clone --depth 1 https://github.com/ietf-wg-cellar/flac-test-files.git test/flac-test-files
+
+      - name: Install ffmpeg and flac
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg flac
+
+      # The round trip decodes with flac_to_wav, so both CLIs are built.
+      - name: Build flac_to_wav and wav_to_flac
+        run: |
+          for example in flac_to_wav wav_to_flac; do
+            cmake -B host_examples/$example/build -DENABLE_SANITIZERS=ON -DENABLE_WERROR=ON \
+              host_examples/$example
+            cmake --build host_examples/$example/build -j"$(nproc)"
+          done
+
+      - name: Run round-trip tests
+        run: python3 host_examples/wav_to_flac/test_flac_encoder.py
+
   encoder-unit:
     name: "Encoder unit tests"
     runs-on: ubuntu-latest
@@ -308,6 +353,7 @@ jobs:
       - cppcheck
       - build
       - test
+      - encoder-test
       - encoder-unit
       - fuzz
       - platformio

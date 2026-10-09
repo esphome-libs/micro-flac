@@ -20,9 +20,9 @@ add_executable(flac_to_wav src/flac_to_wav.cpp)
 # Link against microFLAC library
 target_link_libraries(flac_to_wav PRIVATE micro_flac)
 
-# Include directories for md5.h
+# md5.h, shared with wav_to_flac
 target_include_directories(flac_to_wav PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/include
 )
 
 # Install target
