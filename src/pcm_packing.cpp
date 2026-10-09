@@ -17,7 +17,15 @@
 #include "compiler.h"
 #include "wrapping_arithmetic.h"
 
+#include <cstddef>
+#include <cstring>
+#include <type_traits>
+
 namespace micro_flac {
+
+// ============================================================================
+// Packing
+// ============================================================================
 
 FLAC_OPTIMIZE_O3
 static void write_samples_nch(uint8_t* output_buffer, const int32_t* block_samples,
@@ -287,6 +295,259 @@ void write_samples(uint8_t* output_buffer, const int32_t* block_samples, uint32_
             write_samples_nch(output_buffer, block_samples, block_size, bytes_per_sample,
                               shift_amount, num_channels);
         }
+    }
+}
+
+// ============================================================================
+// Unpacking
+// ============================================================================
+
+namespace {
+
+// Call body(shift) with shift = 32 - bps, the arithmetic shift that turns a
+// sample at the top of a word into its value. Full-width depths get a
+// compile-time constant, which Xtensa shifts by in one instruction.
+template <uint32_t BYTES, typename Body>
+FLAC_ALWAYS_INLINE void with_sample_shift(uint32_t bps, Body body) {
+    if (bps == 8 * BYTES) {
+        body(std::integral_constant<uint32_t, 32 - (8 * BYTES)>{});
+    } else {
+        body(32 - bps);
+    }
+}
+
+// One packed sample, placed at the top of a word and shifted down. 2-byte
+// samples are one aligned 16-bit load; 1- and 3-byte ones are byte loads.
+template <uint32_t BYTES, typename Shift>
+FLAC_ALWAYS_INLINE int32_t read_packed_sample(const uint8_t* p, Shift shift) {
+    uint32_t top = 0;
+    if (BYTES == 2) {
+        top = static_cast<uint32_t>(
+                  static_cast<uint16_t>(*reinterpret_cast<const aliased_int16_t*>(p)))
+              << 16;
+    } else {
+        top = static_cast<uint32_t>(p[BYTES - 1]) << 24;
+        if (BYTES == 3) {
+            top |= (static_cast<uint32_t>(p[0]) << 8) | (static_cast<uint32_t>(p[1]) << 16);
+        }
+    }
+    return static_cast<int32_t>(top) >> shift;
+}
+
+#ifdef FLAC_FAST_UNALIGNED_LOADS
+// read_packed_sample<3>() as one unaligned 32-bit load, on hosts where that
+// is cheap. The fourth byte, the next one in the input, must be readable, so
+// callers leave each run's last frame to the byte loads.
+template <typename Shift>
+FLAC_ALWAYS_INLINE int32_t read_packed_sample_24_load(const uint8_t* p, Shift shift) {
+    uint32_t word = 0;
+    std::memcpy(&word, p, sizeof(word));
+    return static_cast<int32_t>(word << 8) >> shift;
+}
+#endif
+
+// Deinterleave channel `ch` of `n` frames into `dst`. Aligned 24-bit mono and
+// stereo input is read three words per 12 bytes, as read_stereo() diagrams,
+// at about half the instructions of byte loads.
+template <uint32_t BYTES>
+void fill_channel(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch, uint32_t num_channels,
+                  uint32_t bps) {
+    const size_t frame_bytes = static_cast<size_t>(BYTES) * num_channels;
+    const uint8_t* p = src + (static_cast<size_t>(BYTES) * ch);
+    with_sample_shift<BYTES>(bps, [&](auto shift) {
+        uint32_t i = 0;
+        if (BYTES == 3 && num_channels <= 2 && (reinterpret_cast<uintptr_t>(src) & 3U) == 0) {
+            // NOLINTBEGIN(readability-magic-numbers) -- byte lanes per read_stereo()'s layout
+            const aliased_uint32_t* w = reinterpret_cast<const aliased_uint32_t*>(src);
+            if (num_channels == 1) {
+                const uint32_t quad_end = n & ~3U;
+                for (; i < quad_end; i += 4) {
+                    const uint32_t w0 = w[0];
+                    const uint32_t w1 = w[1];
+                    const uint32_t w2 = w[2];
+                    w += 3;
+                    dst[i] = static_cast<int32_t>(w0 << 8) >> shift;
+                    dst[i + 1] = static_cast<int32_t>((w1 << 16) | ((w0 >> 16) & 0xFF00U)) >> shift;
+                    dst[i + 2] =
+                        static_cast<int32_t>((w2 << 24) | ((w1 >> 8) & 0xFFFF00U)) >> shift;
+                    dst[i + 3] = static_cast<int32_t>(w2 & 0xFFFFFF00U) >> shift;
+                }
+            } else if (ch == 0) {
+                const uint32_t pair_end = n & ~1U;
+                for (; i < pair_end; i += 2) {
+                    const uint32_t w0 = w[0];
+                    const uint32_t w1 = w[1];
+                    const uint32_t w2 = w[2];
+                    w += 3;
+                    dst[i] = static_cast<int32_t>(w0 << 8) >> shift;
+                    dst[i + 1] =
+                        static_cast<int32_t>((w2 << 24) | ((w1 >> 8) & 0xFFFF00U)) >> shift;
+                }
+            } else {
+                const uint32_t pair_end = n & ~1U;
+                for (; i < pair_end; i += 2) {
+                    const uint32_t w0 = w[0];
+                    const uint32_t w1 = w[1];
+                    const uint32_t w2 = w[2];
+                    w += 3;
+                    dst[i] = static_cast<int32_t>((w1 << 16) | ((w0 >> 16) & 0xFF00U)) >> shift;
+                    dst[i + 1] = static_cast<int32_t>(w2 & 0xFFFFFF00U) >> shift;
+                }
+            }
+            // NOLINTEND(readability-magic-numbers)
+        }
+#ifdef FLAC_FAST_UNALIGNED_LOADS
+        if (BYTES == 3) {
+            for (; i + 1 < n; i++) {  // Frame i + 1 follows the sample's fourth byte
+                dst[i] =
+                    read_packed_sample_24_load(p + (static_cast<size_t>(i) * frame_bytes), shift);
+            }
+        }
+#endif
+        for (; i < n; i++) {
+            dst[i] = read_packed_sample<BYTES>(p + (static_cast<size_t>(i) * frame_bytes), shift);
+        }
+    });
+}
+
+// Read both channels of `n` stereo frames in one pass, handing each frame's
+// samples to store(i, left, right). Aligned 24-bit input is read a word at a
+// time, the reverse of write_samples_24bit_2ch_aligned(): two frames are
+// exactly three words,
+//
+//   L0[0] L0[1] L0[2] R0[0]   R0[1] R0[2] L1[0] L1[1]   L1[2] R1[0] R1[1] R1[2]
+//   \------ word0 ------/     \------ word1 ------/     \------ word2 ------/
+//
+// and each sample is reassembled at the top of a word from them. An odd
+// final frame takes byte loads.
+template <uint32_t BYTES, typename Store>
+FLAC_ALWAYS_INLINE void read_stereo(const uint8_t* src, uint32_t n, uint32_t bps, Store store) {
+    with_sample_shift<BYTES>(bps, [&](auto shift) {
+        uint32_t i = 0;
+        if (BYTES == 3 && (reinterpret_cast<uintptr_t>(src) & 3U) == 0) {
+            // NOLINTBEGIN(readability-magic-numbers) -- byte lanes per the layout above
+            const aliased_uint32_t* w = reinterpret_cast<const aliased_uint32_t*>(src);
+            const uint32_t pair_end = n & ~1U;
+            for (; i < pair_end; i += 2) {
+                const uint32_t w0 = w[0];
+                const uint32_t w1 = w[1];
+                const uint32_t w2 = w[2];
+                w += 3;
+                store(i, static_cast<int32_t>(w0 << 8) >> shift,
+                      static_cast<int32_t>((w1 << 16) | ((w0 >> 16) & 0xFF00U)) >> shift);
+                store(i + 1, static_cast<int32_t>((w2 << 24) | ((w1 >> 8) & 0xFFFF00U)) >> shift,
+                      static_cast<int32_t>(w2 & 0xFFFFFF00U) >> shift);
+            }
+            // NOLINTEND(readability-magic-numbers)
+        }
+#ifdef FLAC_FAST_UNALIGNED_LOADS
+        if (BYTES == 3) {
+            for (; i + 1 < n; i++) {  // Frame i + 1 follows both samples
+                const uint8_t* p = src + (static_cast<size_t>(i) * 2 * BYTES);
+                store(i, read_packed_sample_24_load(p, shift),
+                      read_packed_sample_24_load(p + BYTES, shift));
+            }
+        }
+#endif
+        for (; i < n; i++) {
+            const uint8_t* p = src + (static_cast<size_t>(i) * 2 * BYTES);
+            store(i, read_packed_sample<BYTES>(p, shift),
+                  read_packed_sample<BYTES>(p + BYTES, shift));
+        }
+    });
+}
+
+template <uint32_t BYTES>
+void fill_stereo(int32_t* left, int32_t* right, const uint8_t* src, uint32_t n, uint32_t bps) {
+    read_stereo<BYTES>(src, n, bps, [=](uint32_t i, int32_t l, int32_t r) {
+        left[i] = l;
+        right[i] = r;
+    });
+}
+
+// Derive mid (SIDE false) or side straight from packed stereo, without
+// storing left and right first. No wasted bits gets a constant shift.
+template <uint32_t BYTES, bool SIDE>
+void fill_mid_side(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t wasted) {
+    const auto derive = [&](auto down) {
+        read_stereo<BYTES>(src, n, bps, [=](uint32_t i, int32_t l, int32_t r) {
+            dst[i] = SIDE ? ((l - r) >> down) : ((l + r) >> (down + 1));
+        });
+    };
+    if (wasted == 0) {
+        derive(std::integral_constant<uint32_t, 0>{});
+    } else {
+        derive(wasted);
+    }
+}
+
+template <bool SIDE>
+void dispatch_mid_side(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t bytes,
+                       uint32_t wasted) {
+    switch (bytes) {
+        case 1:
+            fill_mid_side<1, SIDE>(dst, src, n, bps, wasted);
+            break;
+        case 2:
+            fill_mid_side<2, SIDE>(dst, src, n, bps, wasted);
+            break;
+        default:  // 3
+            fill_mid_side<3, SIDE>(dst, src, n, bps, wasted);
+            break;
+    }
+}
+
+}  // namespace
+
+void unpack_channel(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch,
+                    uint32_t num_channels, uint32_t bps, uint32_t bytes) {
+    switch (bytes) {
+        case 1:
+            fill_channel<1>(dst, src, n, ch, num_channels, bps);
+            break;
+        case 2:
+            fill_channel<2>(dst, src, n, ch, num_channels, bps);
+            break;
+        default:  // 3
+            fill_channel<3>(dst, src, n, ch, num_channels, bps);
+            break;
+    }
+}
+
+void unpack_stereo(int32_t* left, int32_t* right, const uint8_t* src, uint32_t n, uint32_t bps,
+                   uint32_t bytes) {
+    switch (bytes) {
+        case 1:
+            fill_stereo<1>(left, right, src, n, bps);
+            break;
+        case 2:
+            fill_stereo<2>(left, right, src, n, bps);
+            break;
+        default:  // 3
+            fill_stereo<3>(left, right, src, n, bps);
+            break;
+    }
+}
+
+void unpack_mid(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t bytes,
+                uint32_t wasted) {
+    dispatch_mid_side<false>(dst, src, n, bps, bytes, wasted);
+}
+
+void unpack_side(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t bytes,
+                 uint32_t wasted) {
+    dispatch_mid_side<true>(dst, src, n, bps, bytes, wasted);
+}
+
+int32_t unpack_sample(const uint8_t* p, uint32_t bps, uint32_t bytes) {
+    const uint32_t shift = 32 - bps;
+    switch (bytes) {
+        case 1:
+            return read_packed_sample<1>(p, shift);
+        case 2:
+            return read_packed_sample<2>(p, shift);
+        default:  // 3
+            return read_packed_sample<3>(p, shift);
     }
 }
 

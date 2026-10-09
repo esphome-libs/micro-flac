@@ -17,9 +17,15 @@
 #include "crc.h"
 #include "flac_format.h"
 
+#include <cstddef>
+
 namespace micro_flac {
 
 namespace {
+
+// ============================================================================
+// Parsing
+// ============================================================================
 
 // Layout of the variable-position frame header fields (RFC 9639 Section 9.1):
 // [sync+flags(4) | coded number(1-7) | block size extra(0-2) |
@@ -222,6 +228,122 @@ FLACDecoderResult parse_frame_header(const uint8_t* header, uint8_t header_len,
     }
 
     return FLAC_DECODER_SUCCESS;
+}
+
+// ============================================================================
+// Writing
+// ============================================================================
+
+namespace {
+
+// The block size's code, plus its extra field for a size the table lacks
+uint8_t select_block_size_code(uint32_t n, uint8_t (&extra)[2], uint8_t& extra_len) {
+    for (size_t i = 1; i < sizeof(BLOCK_SIZE_TABLE) / sizeof(BLOCK_SIZE_TABLE[0]); i++) {
+        if (i != BLOCK_SIZE_CODE_8BIT && i != BLOCK_SIZE_CODE_16BIT && BLOCK_SIZE_TABLE[i] == n) {
+            extra_len = 0;
+            return static_cast<uint8_t>(i);
+        }
+    }
+    const uint32_t v = n - 1;
+    if (v <= 0xFFU) {
+        extra[0] = static_cast<uint8_t>(v);
+        extra_len = 1;
+        return BLOCK_SIZE_CODE_8BIT;
+    }
+    extra[0] = static_cast<uint8_t>((v >> 8) & 0xFFU);
+    extra[1] = static_cast<uint8_t>(v & 0xFFU);
+    extra_len = 2;
+    return BLOCK_SIZE_CODE_16BIT;
+}
+
+// UTF-8-style coded number (RFC 9639 Section 9.1.5), up to 6 bytes (31 bits)
+uint8_t write_coded_number(uint8_t* out, uint32_t value) {
+    if (value < 0x80U) {
+        out[0] = static_cast<uint8_t>(value);
+        return 1;
+    }
+    uint8_t num_bytes = 2;
+    while (num_bytes < 6 && value >= (1UL << (5 * num_bytes + 1))) {
+        num_bytes++;
+    }
+    uint32_t remaining = value;
+    for (uint8_t i = num_bytes; i-- > 1;) {
+        out[i] =
+            static_cast<uint8_t>(0x80U | (remaining & 0x3FU));  // NOLINT(readability-magic-numbers)
+        remaining >>= 6;
+    }
+    // num_bytes leading ones, a zero, then the value's top bits
+    out[0] = static_cast<uint8_t>((0xFFU << (8U - num_bytes)) | remaining);
+    return num_bytes;
+}
+
+}  // namespace
+
+bool select_sample_rate_code(uint32_t sample_rate, SampleRateCode& out) {
+    out = SampleRateCode{};
+    if (sample_rate == 0 || sample_rate > SAMPLE_RATE_MAX) {
+        return false;
+    }
+    for (uint8_t i = 0; i < SAMPLE_RATE_TABLE_MAX; i++) {
+        if (SAMPLE_RATE_TABLE[i] == sample_rate) {
+            out.code = static_cast<uint8_t>(i + 1);
+            return true;
+        }
+    }
+    // NOLINTBEGIN(readability-magic-numbers)
+    if (sample_rate % 1000 == 0 && sample_rate <= SAMPLE_RATE_MAX_KHZ_1BYTE) {
+        out.code = SAMPLE_RATE_CODE_KHZ_1BYTE;
+        out.extra[0] = static_cast<uint8_t>(sample_rate / 1000);
+        out.extra_len = 1;
+        return true;
+    }
+    uint32_t field = 0;
+    if (sample_rate <= SAMPLE_RATE_MAX_HZ_2BYTE) {
+        out.code = SAMPLE_RATE_CODE_HZ_2BYTE;
+        field = sample_rate;
+    } else if (sample_rate % 10 == 0 && sample_rate <= SAMPLE_RATE_MAX_TENS_HZ_2BYTE) {
+        out.code = SAMPLE_RATE_CODE_TENS_HZ_2BYTE;
+        field = sample_rate / 10;
+    } else {
+        out.code = SAMPLE_RATE_CODE_FROM_STREAMINFO;
+        return true;
+    }
+    // NOLINTEND(readability-magic-numbers)
+    out.extra[0] = static_cast<uint8_t>((field >> 8) & 0xFFU);
+    out.extra[1] = static_cast<uint8_t>(field & 0xFFU);
+    out.extra_len = 2;
+    return true;
+}
+
+uint8_t select_bits_per_sample_code(uint32_t bits_per_sample) {
+    for (size_t i = 1; i < sizeof(BPS_TABLE); i++) {
+        if (BPS_TABLE[i] == bits_per_sample) {
+            return static_cast<uint8_t>(i);
+        }
+    }
+    return BPS_CODE_FROM_STREAMINFO;
+}
+
+uint8_t write_frame_header(uint8_t* out, const FrameHeaderFields& fields) {
+    uint8_t block_size_extra[2] = {0, 0};
+    uint8_t block_size_extra_len = 0;
+    const uint8_t block_size_code =
+        select_block_size_code(fields.block_size, block_size_extra, block_size_extra_len);
+
+    out[0] = 0xFF;  // Sync code
+    out[1] = 0xF8;  // Sync code, reserved bit, fixed blocksize  NOLINT(readability-magic-numbers)
+    out[2] = static_cast<uint8_t>((block_size_code << 4) | fields.sample_rate.code);
+    out[3] =
+        static_cast<uint8_t>((fields.channel_assignment << 4) | (fields.bits_per_sample_code << 1));
+    uint8_t len = static_cast<uint8_t>(4 + write_coded_number(out + 4, fields.frame_number));
+    for (uint8_t i = 0; i < block_size_extra_len; i++) {
+        out[len++] = block_size_extra[i];
+    }
+    for (uint8_t i = 0; i < fields.sample_rate.extra_len; i++) {
+        out[len++] = fields.sample_rate.extra[i];
+    }
+    out[len] = calculate_crc8(out, len);
+    return static_cast<uint8_t>(len + 1);
 }
 
 }  // namespace micro_flac

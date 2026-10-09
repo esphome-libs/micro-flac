@@ -25,15 +25,18 @@
 #include <memory>
 #include <vector>
 
-// Marks functions whose return value must not be ignored (the decoder reports
-// errors only through return codes). [[nodiscard]] needs C++17; the library
-// builds at C++14, so fall back to the GNU attribute there.
+// Marks functions whose return value must not be ignored (errors are reported
+// only through return codes). [[nodiscard]] needs C++17; the library builds
+// at C++14, so fall back to the GNU attribute there. flac_decoder.h and
+// flac_encoder.h each define it, so either can be included alone.
+#ifndef MICRO_FLAC_NODISCARD
 #if defined(__cplusplus) && __cplusplus >= 201703L
 #define MICRO_FLAC_NODISCARD [[nodiscard]]
 #elif defined(__GNUC__)
 #define MICRO_FLAC_NODISCARD __attribute__((warn_unused_result))
 #else
 #define MICRO_FLAC_NODISCARD
+#endif
 #endif
 
 #ifndef MICRO_FLAC_DISABLE_OGG

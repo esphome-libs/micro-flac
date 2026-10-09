@@ -83,8 +83,10 @@ EXTRA_INCLUDE_DIRS = ["src", "include"]
 
 # Extra compiler args appended to every invocation, e.g. ["-xc++", "-std=gnu++14"]
 # to force C++ when the compile db mixes C and C++ commands and flag
-# interpolation for a header could pick a C entry. Empty for pure-C++ repos.
-EXTRA_CLANG_ARGS = []
+# interpolation for a header could pick a C entry. -fno-access-control lets
+# test_encoder_config.cpp, which its build compiles with it to reach
+# FLACEncoder's private members, parse; it changes nothing about includes.
+EXTRA_CLANG_ARGS = ["-fno-access-control"]
 
 SOURCE_EXTS = {".cpp", ".cc", ".c"}
 HEADER_EXTS = {".h", ".hpp"}

@@ -1,13 +1,15 @@
-# microFLAC - Embedded FLAC Decoder
+# microFLAC - Embedded FLAC Decoder and Encoder
 
 [![CI](https://github.com/esphome-libs/micro-flac/actions/workflows/ci.yml/badge.svg)](https://github.com/esphome-libs/micro-flac/actions/workflows/ci.yml)
 [![Component Registry](https://components.espressif.com/components/esphome/micro-flac/badge.svg)](https://components.espressif.com/components/esphome/micro-flac)
 
-A FLAC (Free Lossless Audio Codec) decoder optimized for ESP32 embedded devices. Supports both native FLAC and Ogg FLAC containers with automatic format detection. Designed as an ESP-IDF component with PSRAM support and Xtensa assembly optimizations for ESP32/ESP32-S3.
+A FLAC (Free Lossless Audio Codec) decoder and encoder optimized for ESP32 embedded devices. The decoder supports both native FLAC and Ogg FLAC containers with automatic format detection; the encoder produces native FLAC from 4-24 bit PCM in 1-8 channels. Designed as an ESP-IDF component with PSRAM support and Xtensa assembly optimizations for ESP32/ESP32-S3.
 
 [![A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/ohf-project.png)](https://www.openhomefoundation.org/)
 
 ## Features
+
+### Decoding
 
 - **Native FLAC and Ogg FLAC**: Automatic container detection from first 4 bytes
 - **Unified streaming API**: Single `decode()` method handles container detection, header parsing, and frame decoding
@@ -16,6 +18,15 @@ A FLAC (Free Lossless Audio Codec) decoder optimized for ESP32 embedded devices.
 - **PSRAM support**: Configurable memory placement with automatic fallback
 - **Metadata extraction**: Album art, Vorbis comments, seektable, and more with configurable size limits
 - **Xtensa optimizations**: LPC prediction with hardware multiply-accumulate on ESP32/ESP32-S3; C fallback on RISC-V chips (C3, C6, P4) and host
+
+### Encoding
+
+- **4-24 bit PCM input, 1-8 channels**: Packed interleaved bytes in exactly the layout the decoder outputs (`PcmFormat`)
+- **Fixed predictors**: Orders 0-4, chosen per subframe. All integer arithmetic, so output is identical on every platform
+- **Stereo decorrelation**: Each frame takes the cheapest of the four channel assignments
+- **Wasted-bits detection**: 16-bit audio in a 24-bit stream codes nearly as small as a 16-bit stream
+- **No buffering, no allocation**: `encode()` reads one block straight from the caller's buffer; all working memory is the ~2.1 KB object plus up to ~1.6 KB of task stack
+- **Finished stream header**: After `finish()`, a same-size header carrying the total sample count and frame-size range can overwrite the first
 
 ## Quick Start
 
@@ -32,7 +43,7 @@ git clone https://github.com/esphome-libs/micro-flac.git
 
 ```bash
 pio run -e esp32s3 --target menuconfig
-# Navigate to: Component config → microFLAC Decoder
+# Navigate to: Component config → microFLAC
 ```
 
 1. Include and use:
@@ -78,6 +89,56 @@ while (have_data) {
 delete[] output;
 ```
 
+### Encoding Example
+
+```cpp
+#include "micro_flac/flac_encoder.h"
+
+using namespace micro_flac;
+
+// 44.1kHz 16-bit stereo input; FLACEncoderOptions (block size, wasted bits)
+// can be passed as a second argument.
+FLACEncoder encoder(PcmFormat{44100, 2, 16});
+
+std::vector<uint8_t> out(encoder.get_max_output_bytes());  // fits the header and any frame
+size_t bytes_written = 0;
+
+// The first call reports an unsupported configuration
+if (encoder.write_header(out.data(), out.size(), bytes_written) != FLAC_ENCODER_SUCCESS) {
+    // handle error
+}
+// write out.data()[0 .. bytes_written) to the output stream/file
+
+while (have_input) {
+    size_t bytes_consumed = 0;
+    auto result = encoder.encode(input, input_len, out.data(), out.size(),
+                                 bytes_consumed, bytes_written);
+    if (result == FLAC_ENCODER_NEED_MORE_DATA) {
+        // Less than one block (encoder.get_input_block_bytes()) is available and nothing
+        // was consumed: append more input and call again
+    } else if (result == FLAC_ENCODER_SUCCESS) {
+        // write out.data()[0 .. bytes_written) to the output stream/file
+        input += bytes_consumed;
+        input_len -= bytes_consumed;
+    } else {
+        break;  // negative values are errors
+    }
+}
+
+// Encode whatever is left (less than one block) as the final frame
+if (encoder.finish(input, input_len, out.data(), out.size(), bytes_written) == FLAC_ENCODER_SUCCESS) {
+    // write out.data()[0 .. bytes_written) to the output stream/file
+}
+
+// Optional, for seekable output: the finished header carries the total sample
+// count and frame sizes, and is the same size as the first one
+if (encoder.write_header(out.data(), out.size(), bytes_written) == FLAC_ENCODER_SUCCESS) {
+    // overwrite the first bytes_written (FLACEncoder::HEADER_BYTES) of the output with it
+}
+```
+
+The stream is decodable exactly as emitted. The header written before `finish()` leaves STREAMINFO's total sample count and minimum/maximum frame size as "unknown" (spec-legal); rewriting it after `finish()` fills them in. The MD5 signature is always left unset; a caller can compute it and write it into the finished header's last 16 bytes.
+
 ### PlatformIO
 
 Add to `platformio.ini`:
@@ -105,7 +166,7 @@ cmake -B build && cmake --build build
 
 ## API Reference
 
-### Key Methods
+### Decoder Methods
 
 | Method | Description |
 | ------ | ----------- |
@@ -136,7 +197,7 @@ Available after `decode()` returns `FLAC_DECODER_HEADER_READY` via `decoder.get_
 | `md5_signature()` | Pointer to 16-byte MD5 signature of unencoded audio data |
 | `is_valid()` | Whether STREAMINFO has been parsed |
 
-### Result Codes
+### Decoder Result Codes
 
 `decode()` returns `FLACDecoderResult`: non-negative values indicate success/informational states, negative values indicate errors. See `flac_decoder.h` for the full enum.
 
@@ -147,9 +208,51 @@ Available after `decode()` returns `FLAC_DECODER_HEADER_READY` via `decoder.get_
 | `FLAC_DECODER_END_OF_STREAM` | 2 | No more frames to decode |
 | `FLAC_DECODER_NEED_MORE_DATA` | 3 | Not enough input data; feed more and call `decode()` again |
 
+### Encoder Methods
+
+`FLACEncoder` encodes interleaved 4-24 bit PCM in 1-8 channels to native FLAC with a fixed block size: every frame but the last holds exactly `block_size` samples per channel. It is configured at construction, or later with `reset(format, options)`, from two structs:
+
+- **`PcmFormat`** (`micro_flac/pcm_format.h`) describes the input. Construct it as `PcmFormat{sample_rate, num_channels, bits_per_sample}` (1-1048575 Hz, 1-8 channels, 4-24 bits) and read it back through `sample_rate()`, `num_channels()`, `bits_per_sample()`, `bytes_per_sample()`, `bytes_per_frame()` and `is_valid()`, as in the other micro-* libraries. Samples are interleaved, little-endian, signed and `ceil(bits_per_sample() / 8)` bytes wide, with other depths left-justified (a 12-bit sample fills the top 12 bits of its 2 bytes). This is exactly what the decoder's `uint8_t*` `decode()` produces. 2-byte samples must be 2-byte aligned.
+- **`FLACEncoderOptions`** controls compression:
+  - `block_size` (16-65535, default 4096).
+  - `wasted_bits` (default on): code a subframe whose samples all end in the same k zero bits k bits shallower (RFC 9639 §9.2.2), as with 16-bit audio in a 24-bit stream.
+
+Every format is unpacked 256 samples per channel at a time into a 2 KB buffer inside the encoder object, which never allocates.
+
+| Method | Description |
+| ------ | ----------- |
+| `FLACEncoder(format, options = {})` | Construct for one input format. Never fails and allocates nothing; the configuration is validated here and reported by the first call below |
+| `write_header(output, output_size_bytes, bytes_written)` | Write the `HEADER_BYTES` (42) byte `fLaC` marker and STREAMINFO block. Before `finish()` the total sample count and frame sizes are "unknown"; afterwards they are filled in (unless too large for STREAMINFO's fields), at the same size, so the finished header can overwrite the first one |
+| `encode(input, input_len, output, output_size_bytes, bytes_consumed, bytes_written)` | Consume exactly one block (`get_input_block_bytes()`) and write one frame, or return `FLAC_ENCODER_NEED_MORE_DATA` without consuming anything if `input_len` is shorter than a block |
+| `finish(input, input_len, output, output_size_bytes, bytes_written)` | Encode the remainder (0 bytes up to one block, whole sample frames) as the final frame and end the stream |
+| `reset()` | Reset stream state for encoding a new stream (preserves configuration) |
+| `reset(format, options = {})` | Reset and reconfigure, leaving the encoder as the constructor would. Never fails; a rejected configuration is reported by the next call. Re-check the output buffer against `get_max_output_bytes()` afterwards |
+| `get_max_output_bytes()` | Output buffer size that fits the header and every frame; constant until `reset(format, options)` reconfigures the encoder |
+| `get_input_block_bytes()` | Input bytes one `encode()` call consumes (`block_size * num_channels * bytes_per_sample`) |
+| `get_total_samples_encoded()` | Samples per channel encoded in the current stream |
+| `get_pcm_format()` / `get_options()` | The current configuration, from the constructor or the last `reset(format, options)` |
+
+### Encoder Result Codes
+
+Every call returns `FLACEncoderResult`: non-negative values are success/informational, negative values are errors. An error consumes no input and reports no output (`bytes_written` is 0; the output buffer's contents are unspecified). `OUTPUT_BUFFER_TOO_SMALL` and `INVALID_ARGUMENT` can be fixed and retried; `BAD_CONFIG` persists until `reset(format, options)` supplies a supported configuration; after `STREAM_FINISHED` or `STREAM_TOO_LONG`, `reset()` starts a new stream (`finish()` with no input still ends a too-long stream cleanly).
+
+| Code | Value | Description |
+| ---- | ----- | ----------- |
+| `FLAC_ENCODER_SUCCESS` | 0 | The call did its work (check `bytes_written`) |
+| `FLAC_ENCODER_NEED_MORE_DATA` | 1 | `encode()` was given less than one block; nothing consumed |
+| `FLAC_ENCODER_ERROR_OUTPUT_BUFFER_TOO_SMALL` | -1 | Output buffer smaller than `get_max_output_bytes()` (or `HEADER_BYTES` for `write_header()`) |
+| `FLAC_ENCODER_ERROR_INVALID_ARGUMENT` | -2 | Null pointer, misaligned 2-byte-sample input, or a `finish()` remainder that is not whole sample frames or is longer than one block |
+| `FLAC_ENCODER_ERROR_BAD_CONFIG` | -3 | Unsupported `PcmFormat` or `FLACEncoderOptions`. Persists until `reset(format, options)` with a supported configuration |
+| `FLAC_ENCODER_ERROR_STREAM_FINISHED` | -4 | `encode()` or `finish()` after `finish()`; call `reset()` to start a new stream |
+| `FLAC_ENCODER_ERROR_STREAM_TOO_LONG` | -5 | The next frame number would exceed the format's 2^31 - 1 |
+
+### Output Bound Guarantee
+
+`get_max_output_bytes()` is a hard upper bound on what any call can write. A call with a frame to write checks the output size first and returns `FLAC_ENCODER_ERROR_OUTPUT_BUFFER_TOO_SMALL` without touching `output` if it is smaller. The bound holds for every input because a FIXED subframe is written only when it is provably smaller than VERBATIM.
+
 ## Configuration
 
-Configure via ESP-IDF menuconfig (`Component config → microFLAC Decoder`) or compile flags.
+Configure via ESP-IDF menuconfig (`Component config → microFLAC`) or compile flags.
 
 | Option | Default | Kconfig / Compile Flag | Notes |
 | ------ | ------- | ---------------------- | ----- |
@@ -179,8 +282,11 @@ ESP32-S3 and ESP32-P4 numbers are measured with the working buffer in PSRAM (the
 | Block samples buffer | `max_block_size × channels × 4` | Typically 16-64KB |
 | Metadata blocks | Variable | Configurable per type |
 | Output buffer | `max_block_size × channels × bytes_per_sample` | Allocated by user |
+| Encoder object | ~2.1 KB | Stack or heap. `encode()` itself needs up to about 1.6 KB of task stack |
+| Encoder output buffer | `get_max_output_bytes()` | Allocated by user; fits one worst-case frame |
+| Encoder input | One block (`get_input_block_bytes()`) | The caller's buffer, unpacked a chunk at a time |
 
-**PSRAM is recommended** for the block samples buffer to conserve internal RAM.
+**PSRAM is recommended** for the decoder's block samples buffer to conserve internal RAM.
 
 ## Testing
 
@@ -200,7 +306,7 @@ cd examples/decode_benchmark
 pio run -e esp32s3 -t upload -t monitor
 ```
 
-Unit tests for the bit writer live in `tests/encoder`:
+Unit tests for the bit writer and the encoder's configuration and argument handling live in `tests/encoder`:
 
 ```bash
 cd tests/encoder
@@ -259,6 +365,12 @@ Override `FLAC_MALLOC` and `FLAC_FREE` at compile time (`-DFLAC_MALLOC=my_custom
 
 - **No seeking support**: Decoder is designed for streaming, not random access
 - **No automatic MD5 validation**: The MD5 signature is extracted from STREAMINFO and accessible via `get_stream_info().md5_signature()`, but not automatically validated during decoding
+- **Encoder tops out at 24-bit**: Any depth outside 4-24 is `FLAC_ENCODER_ERROR_BAD_CONFIG`; 32-bit input would need a 64-bit residual path
+- **Encoder uses a fixed block size**: Every frame but the last is `block_size` samples; there is no variable-blocksize mode
+- **Streamable subset is up to the caller**: Block sizes above 16384, or above 4608 at 48 kHz or below, bit depths other than 8/12/16/20/24, and sample rates no frame header code can carry (above 65535 Hz, other than multiples of 10 up to 655350 Hz and whole kHz up to 255 kHz; these are read from STREAMINFO) fall outside RFC 9639's streamable subset (§7), which a strict subset-only decoder may refuse. The defaults are within it
+- **Encoder writes no MD5 signature**: STREAMINFO's MD5 is left zeroed ("unknown"). The caller can hash the input and patch the digest into the finished header
+- **Encoder output is native FLAC only**: No Ogg FLAC container, seektables, or Vorbis comments
+- **Encoder has no Xtensa assembly**: C implementation on all targets
 
 ## License
 

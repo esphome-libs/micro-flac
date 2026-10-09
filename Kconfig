@@ -1,4 +1,4 @@
-menu "microFLAC Decoder"
+menu "microFLAC"
 
     choice MICRO_FLAC_MEMORY_PREFERENCE
         prompt "Memory allocation preference"

@@ -81,6 +81,20 @@
 #define FLAC_ASSUME(x) ((void)0)
 #endif
 
+// Marks a type as able to alias any other, like char
+#if defined(__GNUC__) || defined(__clang__)
+#define FLAC_MAY_ALIAS __attribute__((__may_alias__))
+#else
+#define FLAC_MAY_ALIAS
+#endif
+
+// 64-bit little-endian hosts with cheap unaligned 32-bit loads. Xtensa faults
+// on them and RISC-V may trap, so embedded targets leave this undefined.
+#if (defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)) && \
+    (!defined(__BYTE_ORDER__) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#define FLAC_FAST_UNALIGNED_LOADS 1
+#endif
+
 // Silence UBSan signed-integer-overflow in LPC restore functions.
 // FLAC LPC prediction intentionally uses wrapping int32_t arithmetic;
 // overflows in this path are audio-only and not a security concern.
@@ -94,6 +108,11 @@
 #include <cstdint>
 
 namespace micro_flac {
+
+// Types for reading packed PCM bytes more than one byte at a time. The
+// buffer's real type is the caller's, so these must be allowed to alias it.
+typedef int16_t FLAC_MAY_ALIAS aliased_int16_t;
+typedef uint32_t FLAC_MAY_ALIAS aliased_uint32_t;
 
 // ============================================================================
 // Bit Buffer Constants (implementation-only)
