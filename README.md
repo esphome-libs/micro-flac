@@ -200,6 +200,14 @@ cd examples/decode_benchmark
 pio run -e esp32s3 -t upload -t monitor
 ```
 
+Unit tests for the bit writer live in `tests/encoder`:
+
+```bash
+cd tests/encoder
+cmake -B build && cmake --build build
+ctest --test-dir build
+```
+
 ## Advanced Features
 
 ### 32-bit Sample Output Mode
