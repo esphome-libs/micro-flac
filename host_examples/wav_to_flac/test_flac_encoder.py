@@ -148,7 +148,7 @@ def extract_pcm_from_wav(wav_file):
                 chunk_size = int.from_bytes(f.read(4), "little")
                 if chunk_id == b"data":
                     return f.read(chunk_size)
-                f.seek(chunk_size, 1)
+                f.seek(chunk_size + chunk_size % 2, 1)  # RIFF pads odd chunks
     except Exception as e:  # pylint: disable=broad-except
         print(f"Error reading WAV file {wav_file}: {e}")
         return None
