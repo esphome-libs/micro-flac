@@ -135,7 +135,8 @@ static uint32_t clamp_wav_data_size(uint64_t samples_per_channel, uint32_t num_c
     return (data_size <= max_data) ? static_cast<uint32_t>(data_size) : max_data;
 }
 
-static void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_channels,
+// Returns false if a write fails
+static bool write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_channels,
                              uint16_t bits_per_sample, uint64_t num_samples) {
     WAVHeader header{};
     WAVExtensibleHeader ext_header{};
@@ -216,11 +217,9 @@ static void write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_chan
     uint32_t data_chunk_size = 8 + data_chunk.data_size;      // "data" + size + data
     header.file_size = 4 + fmt_chunk_size + data_chunk_size;  // "WAVE" + chunks
 
-    std::fwrite(&header, sizeof(header), 1, file);
-    if (use_extensible) {
-        std::fwrite(&ext_header, sizeof(ext_header), 1, file);
-    }
-    std::fwrite(&data_chunk, sizeof(data_chunk), 1, file);
+    return write_all(file, &header, sizeof(header)) &&
+           (!use_extensible || write_all(file, &ext_header, sizeof(ext_header))) &&
+           write_all(file, &data_chunk, sizeof(data_chunk));
 }
 
 struct Args {
@@ -273,23 +272,23 @@ static bool parse_args(int argc, const char* const argv[], Args& args) {
     return true;
 }
 
-static void update_wav_header(const char* output_file, long header_end_pos,
+// Returns false if the file cannot be reopened or written
+static bool update_wav_header(const char* output_file, long header_end_pos,
                               uint64_t samples_per_channel_decoded, uint32_t num_channels,
                               uint32_t bytes_per_sample) {
     FILE* f = std::fopen(output_file, "r+b");
-    if (f) {
-        uint32_t non_data_bytes = static_cast<uint32_t>(header_end_pos) - 8;
-        uint32_t data_size = clamp_wav_data_size(samples_per_channel_decoded, num_channels,
-                                                 bytes_per_sample, non_data_bytes);
-        uint32_t file_size = non_data_bytes + data_size;
-
-        std::fseek(f, 4, SEEK_SET);
-        std::fwrite(&file_size, 4, 1, f);
-
-        std::fseek(f, header_end_pos - 4, SEEK_SET);
-        std::fwrite(&data_size, 4, 1, f);
-        std::fclose(f);
+    if (!f) {
+        return false;
     }
+    uint32_t non_data_bytes = static_cast<uint32_t>(header_end_pos) - 8;
+    uint32_t data_size = clamp_wav_data_size(samples_per_channel_decoded, num_channels,
+                                             bytes_per_sample, non_data_bytes);
+    uint32_t file_size = non_data_bytes + data_size;
+
+    const bool written = std::fseek(f, 4, SEEK_SET) == 0 && write_all(f, &file_size, 4) &&
+                         std::fseek(f, header_end_pos - 4, SEEK_SET) == 0 &&
+                         write_all(f, &data_size, 4);
+    return close_checked(f) && written;
 }
 
 static void verify_md5(MD5& md5_ctx, const uint8_t (&md5_sig)[16], bool md5_all_zero) {
@@ -383,8 +382,9 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     uint32_t frames_decoded = 0;
     uint64_t samples_per_channel_decoded = 0;
 
-    // Helper lambda to process decoded samples (MD5 update + WAV write)
-    auto process_decoded_samples = [&](size_t num_samples) {
+    // Helper lambda to process decoded samples (MD5 update + WAV write).
+    // Returns false if the WAV write fails.
+    auto process_decoded_samples = [&](size_t num_samples) -> bool {
         uint32_t num_samples_u32 = static_cast<uint32_t>(num_samples);
         uint32_t bytes_to_write = num_samples_u32 * bytes_per_sample_out;
 
@@ -434,7 +434,9 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
             }
             if (writable > 0) {
                 if (output_32bit) {
-                    std::fwrite(output_buffer_32.data(), 1, writable, wav_file);
+                    if (!write_all(wav_file, output_buffer_32.data(), writable)) {
+                        return false;
+                    }
                 } else {
                     if (bits_per_sample == 8) {
                         for (uint32_t i = 0; i < writable; i++) {
@@ -442,7 +444,9 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                                 static_cast<uint8_t>(static_cast<int8_t>(output_buffer[i]) + 128);
                         }
                     }
-                    std::fwrite(output_buffer.data(), 1, writable, wav_file);
+                    if (!write_all(wav_file, output_buffer.data(), writable)) {
+                        return false;
+                    }
                 }
             }
             wav_data_bytes_written += writable;
@@ -461,6 +465,7 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                         static_cast<unsigned long long>(samples_per_channel_decoded *
                                                         PERCENTAGE_MULTIPLIER / total_samples));
         }
+        return true;
     };
 
     // Main decode loop using unified decode() API
@@ -563,8 +568,15 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                     {
                         uint16_t wav_bps =
                             output_32bit ? BIT_DEPTH_32 : static_cast<uint16_t>(bits_per_sample);
-                        write_wav_header(wav_file, sample_rate, static_cast<uint16_t>(num_channels),
-                                         wav_bps, total_samples);
+                        if (!write_wav_header(wav_file, sample_rate,
+                                              static_cast<uint16_t>(num_channels), wav_bps,
+                                              total_samples)) {
+                            std::fprintf(stderr, "Error: Could not write output file: %s\n",
+                                         output_file);
+                            std::fclose(wav_file);
+                            std::fclose(flac_file);
+                            return 1;
+                        }
                     }
                     header_end_pos = std::ftell(wav_file);
                     wav_frame_bytes_out = num_channels * bytes_per_sample_out;
@@ -574,7 +586,13 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                     break;
                 }
                 case FLAC_DECODER_SUCCESS:
-                    process_decoded_samples(samples);
+                    if (!process_decoded_samples(samples)) {
+                        std::fprintf(stderr, "Error: Could not write output file: %s\n",
+                                     output_file);
+                        std::fclose(wav_file);
+                        std::fclose(flac_file);
+                        return 1;
+                    }
                     break;
                 case FLAC_DECODER_NEED_MORE_DATA:
                     // Force inner loop exit: need fresh data from file
@@ -601,14 +619,18 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     std::fclose(flac_file);
 
     // If total_samples was unknown (0) or incorrect, update the WAV header with actual sample count
-    if (wav_file && samples_per_channel_decoded != total_samples &&
-        samples_per_channel_decoded > 0) {
-        std::fclose(wav_file);
-        uint32_t bytes_per_sample = output_32bit ? 4 : (bits_per_sample + 7) / 8;
-        update_wav_header(output_file, header_end_pos, samples_per_channel_decoded, num_channels,
-                          bytes_per_sample);
-    } else if (wav_file) {
-        std::fclose(wav_file);
+    if (wav_file) {
+        bool wav_ok = close_checked(wav_file);
+        if (wav_ok && samples_per_channel_decoded != total_samples &&
+            samples_per_channel_decoded > 0) {
+            uint32_t bytes_per_sample = output_32bit ? 4 : (bits_per_sample + 7) / 8;
+            wav_ok = update_wav_header(output_file, header_end_pos, samples_per_channel_decoded,
+                                       num_channels, bytes_per_sample);
+        }
+        if (!wav_ok) {
+            std::fprintf(stderr, "Error: Could not write output file: %s\n", output_file);
+            return 1;
+        }
     }
 
     std::printf("Successfully converted to WAV!\n");

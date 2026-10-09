@@ -362,7 +362,12 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
         std::fclose(wav_file);
         return 1;
     }
-    std::fwrite(out_buffer.data(), 1, bytes_written, flac_file);
+    if (!write_all(flac_file, out_buffer.data(), bytes_written)) {
+        std::fprintf(stderr, "Error: could not write output file: %s\n", args.output_file);
+        std::fclose(wav_file);
+        std::fclose(flac_file);
+        return 1;
+    }
 
     // The stream's MD5 signature, which FLACEncoder leaves to its caller
     // (STREAMINFO's field stays zero, "unknown", otherwise). RFC 9639 SS8.2
@@ -458,7 +463,12 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
             }
         }
 
-        std::fwrite(out_buffer.data(), 1, bytes_written, flac_file);
+        if (!write_all(flac_file, out_buffer.data(), bytes_written)) {
+            std::fprintf(stderr, "Error: could not write output file: %s\n", args.output_file);
+            std::fclose(wav_file);
+            std::fclose(flac_file);
+            return 1;
+        }
         total_output_bytes += bytes_written;
         if (bytes_written > largest_frame_bytes) {
             largest_frame_bytes = bytes_written;
@@ -477,8 +487,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     const std::array<uint8_t, MD5_SIGNATURE_BYTES> md5_signature = md5.finalize();
     std::memcpy(out_buffer.data() + STREAMINFO_MD5_OFFSET, md5_signature.data(),
                 md5_signature.size());
-    std::fwrite(out_buffer.data(), 1, bytes_written, flac_file);
-    std::fclose(flac_file);
+    const bool header_written = write_all(flac_file, out_buffer.data(), bytes_written);
+    if (!close_checked(flac_file) || !header_written) {
+        std::fprintf(stderr, "Error: could not write output file: %s\n", args.output_file);
+        return 1;
+    }
 
     const uint64_t samples_encoded = encoder.get_total_samples_encoded();
     const uint64_t total_samples_all_channels = samples_encoded * wav_info.num_channels;

@@ -18,6 +18,9 @@
 
 #include <sys/stat.h>
 
+#include <cstddef>
+#include <cstdio>
+
 // Whether `output_path` names the regular file at `input_path`, through any
 // alias (the same path, a symlink, or a hard link). Opening it for writing with
 // "wb" would truncate the input before it is read. A path that does not exist
@@ -30,4 +33,16 @@ inline bool is_same_file(const char* output_path, const char* input_path) {
     }
     return S_ISREG(output_stat.st_mode) && output_stat.st_dev == input_stat.st_dev &&
            output_stat.st_ino == input_stat.st_ino;
+}
+
+// Writes all `size` bytes, returning false on a short write (a full disk, for
+// example)
+inline bool write_all(FILE* file, const void* data, size_t size) {
+    return std::fwrite(data, 1, size, file) == size;
+}
+
+// Closes `file`, returning false if flushing its buffered writes or the close
+// itself failed. The file is closed either way.
+inline bool close_checked(FILE* file) {
+    return std::fclose(file) == 0;
 }
