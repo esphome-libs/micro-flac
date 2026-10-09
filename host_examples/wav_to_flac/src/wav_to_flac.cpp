@@ -30,9 +30,6 @@ namespace {
 
 constexpr uint32_t DEFAULT_BLOCK_SIZE = 4096;
 
-// Independent stereo's channel assignment code (RFC 9639 SS9.1.3)
-constexpr uint8_t CHANNEL_ASSIGNMENT_INDEPENDENT_STEREO = 1;
-
 // 8-bit WAV PCM is unsigned; flipping the top bit makes it PcmFormat's signed bytes
 constexpr uint8_t WAV_8BIT_SIGN_FLIP = 0x80;
 
@@ -390,7 +387,7 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
         if (wav_info.num_channels == 2) {
             const uint8_t assignment_code = static_cast<uint8_t>(out_buffer[3] >> 4);
             switch (assignment_code) {
-                case CHANNEL_ASSIGNMENT_INDEPENDENT_STEREO:
+                case CHANNEL_INDEPENDENT_STEREO:
                     assignment_count_independent++;
                     break;
                 case CHANNEL_LEFT_SIDE:
