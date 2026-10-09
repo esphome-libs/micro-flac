@@ -5,9 +5,9 @@ Includes synthetic vector generation for orders not found in real FLAC data
 (particularly orders > 12 which exercise the generic assembly loop).
 
 Usage:
-    python3 generate_test_vectors.py -i lpc_vectors.bin -o src/test_lpc_vectors.h
-    python3 generate_test_vectors.py -i lpc_vectors.bin -o src/test_lpc_vectors.h --max-per-group 4
-    python3 generate_test_vectors.py -i lpc_vectors.bin -o src/test_lpc_vectors.h --no-synthetic
+    python3 generate_test_vectors.py -i lpc_vectors.bin -o main/test_lpc_vectors.h
+    python3 generate_test_vectors.py -i lpc_vectors.bin -o main/test_lpc_vectors.h --max-per-group 4
+    python3 generate_test_vectors.py -i lpc_vectors.bin -o main/test_lpc_vectors.h --no-synthetic
 """
 
 import argparse

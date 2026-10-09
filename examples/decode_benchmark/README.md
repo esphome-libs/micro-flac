@@ -48,8 +48,8 @@ Use public domain music from [Musopen on Archive.org](https://archive.org/detail
 3. **Generate the C header files**:
 
    ```bash
-   python convert_flac.py -i clip.flac -o src/test_audio_flac.h -v test_audio_flac_data
-   python convert_flac.py -i clip_24bit.flac -o src/test_audio_flac_24bit.h -v test_audio_flac_24bit_data
+   python convert_flac.py -i clip.flac -o main/test_audio_flac.h -v test_audio_flac_data
+   python convert_flac.py -i clip_24bit.flac -o main/test_audio_flac_24bit.h -v test_audio_flac_24bit_data
    ```
 
 ## Building and Running
@@ -182,7 +182,7 @@ Performance varies based on:
 
 ```text
 decode_benchmark/
-├── src/
+├── main/
 │   ├── CMakeLists.txt         # ESP-IDF component file
 │   ├── main.cpp               # Benchmark code
 │   ├── test_audio_flac.h      # Generated 16-bit FLAC data header

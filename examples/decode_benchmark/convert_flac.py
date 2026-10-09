@@ -6,7 +6,7 @@ Usage:
     python convert_flac.py -i input.flac -o output.h -v variable_name
 
 Example:
-    python convert_flac.py -i eroica_clip.flac -o src/test_audio_flac.h -v test_audio_flac_data
+    python convert_flac.py -i eroica_clip.flac -o main/test_audio_flac.h -v test_audio_flac_data
 """
 
 import argparse
