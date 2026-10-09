@@ -31,9 +31,8 @@
 //
 // Exits 0 on success; prints each failure and exits 1 otherwise.
 
-#include "micro_flac/flac_decoder.h"
-
 #include "crc.h"
+#include "micro_flac/flac_decoder.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -51,14 +50,14 @@ namespace {
 
 int g_failures = 0;
 
-#define EXPECT(cond, ...)                                             \
-    do {                                                              \
-        if (!(cond)) {                                                \
-            std::printf("FAIL %s:%d: ", __func__, __LINE__);          \
-            std::printf(__VA_ARGS__);                                 \
-            std::printf("\n");                                        \
-            ++g_failures;                                             \
-        }                                                             \
+#define EXPECT(cond, ...)                                    \
+    do {                                                     \
+        if (!(cond)) {                                       \
+            std::printf("FAIL %s:%d: ", __func__, __LINE__); \
+            std::printf(__VA_ARGS__);                        \
+            std::printf("\n");                               \
+            ++g_failures;                                    \
+        }                                                    \
     } while (0)
 
 constexpr uint32_t BLOCK_SIZE = 192;
@@ -68,10 +67,10 @@ constexpr int16_t FRAME_VALUES[NUM_FRAMES] = {0x1234, 0x2345, 0x3456, 0x4567, 0x
 
 // How the coded frame number in a synthetic frame header is encoded
 enum class CodedNumberVariant {
-    VALID,               // minimal 1-byte encoding
-    INVALID_LEAD_FF,     // 0xFF is not a legal leading byte
-    INVALID_CONTINUATION,// leading byte 0xC2 followed by a non-10xxxxxx byte
-    SEVEN_BYTE_FORM,     // 0xFE form only valid for variable-block-size streams
+    VALID,                 // minimal 1-byte encoding
+    INVALID_LEAD_FF,       // 0xFF is not a legal leading byte
+    INVALID_CONTINUATION,  // leading byte 0xC2 followed by a non-10xxxxxx byte
+    SEVEN_BYTE_FORM,       // 0xFE form only valid for variable-block-size streams
 };
 
 struct SyntheticStream {
@@ -151,8 +150,7 @@ SyntheticStream build_stream(CodedNumberVariant first_frame_variant) {
 
     for (size_t i = 0; i < NUM_FRAMES; ++i) {
         stream.frame_offsets[i] = out.size();
-        CodedNumberVariant variant =
-            (i == 0) ? first_frame_variant : CodedNumberVariant::VALID;
+        CodedNumberVariant variant = (i == 0) ? first_frame_variant : CodedNumberVariant::VALID;
         append_frame(out, static_cast<uint32_t>(i), FRAME_VALUES[i], variant);
     }
     stream.frame_offsets[NUM_FRAMES] = out.size();
@@ -230,8 +228,7 @@ void test_baseline_decode(size_t chunk_size) {
            values_to_string(run.frame_values).c_str());
     for (size_t i = 0; i < run.frame_values.size() && i < NUM_FRAMES; ++i) {
         EXPECT(run.frame_values[i] == FRAME_VALUES[i], "frame %zu value 0x%04X != 0x%04X", i,
-               static_cast<uint16_t>(run.frame_values[i]),
-               static_cast<uint16_t>(FRAME_VALUES[i]));
+               static_cast<uint16_t>(run.frame_values[i]), static_cast<uint16_t>(FRAME_VALUES[i]));
     }
 }
 
@@ -256,8 +253,7 @@ void test_crc_error_recovery(size_t chunk_size) {
         // lands exactly on the next frame's sync code.
         EXPECT(run.error_resume_positions[0] == stream.frame_offsets[CORRUPT_FRAME + 1],
                "error resume position %zu != next frame offset %zu (chunk %zu)",
-               run.error_resume_positions[0], stream.frame_offsets[CORRUPT_FRAME + 1],
-               chunk_size);
+               run.error_resume_positions[0], stream.frame_offsets[CORRUPT_FRAME + 1], chunk_size);
     }
 
     std::vector<int16_t> expected;

@@ -14,6 +14,7 @@
 
 #include "decorrelation.h"
 
+#include "flac_format.h"
 #include "wrapping_arithmetic.h"
 
 #include <cstddef>

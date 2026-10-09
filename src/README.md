@@ -17,6 +17,7 @@ Based on [Nayuki's Simple FLAC Implementation](https://www.nayuki.io/res/simple-
 - `flac_decoder.cpp` - Main decoder: state machine, container detection, header/metadata parsing, subframe decoding, residual decoding
 - `bit_reader.h` - Header-only bit-stream primitives: `BitReaderLocal` state struct plus `refill_bit_buffer_local()`, `read_uint_local()`, `read_rice_sint_local<Resuming>()`. Header-only so `FLAC_ALWAYS_INLINE` is honored at every call site
 - `frame_header.h` / `frame_header.cpp` - Frame header parsing: `compute_frame_header_length()`, `parse_frame_header()` (sync validation, field extraction, CRC-8 check, STREAMINFO validation)
+- `flac_format.h` - RFC 9639 constants: the block size, sample rate and bit depth tables, subframe types, channel assignments and the Ogg FLAC prefix, so the parsing code reads names rather than numbers
 - `decorrelation.h` / `decorrelation.cpp` - Stereo channel decorrelation: `apply_channel_decorrelation()` for LEFT_SIDE, RIGHT_SIDE, and MID_SIDE joint stereo modes
 
 ### Output Packing

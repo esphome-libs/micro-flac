@@ -24,11 +24,6 @@
 
 namespace micro_flac {
 
-// FLAC joint stereo channel assignment codes (RFC 9639 Section 9.1.3)
-static constexpr uint32_t CHANNEL_LEFT_SIDE = 8;
-static constexpr uint32_t CHANNEL_RIGHT_SIDE = 9;
-static constexpr uint32_t CHANNEL_MID_SIDE = 10;
-
 /// @brief Apply stereo channel decorrelation for joint stereo modes
 ///
 /// Converts left-side (8), right-side (9), or mid-side (10) channel assignments
