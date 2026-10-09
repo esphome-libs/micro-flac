@@ -64,4 +64,20 @@ menu "microFLAC"
             heap allocation. Disable this if you only need native FLAC
             decoding.
 
+    config MICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS
+        bool "Enable encoder Rice partitioning"
+        default y
+        help
+            Compile in FLACEncoder's opt-in Rice partitioning
+            (FLACEncoderOptions::max_rice_partition_order), which codes each
+            subframe's residuals in up to 64 partitions with their own Rice
+            parameters: about 1% smaller output at 4096-sample blocks, for
+            one more walk over each subframe's residuals. It is off at run time by
+            default either way.
+
+            When disabled, the partitioning code is left out and
+            max_rice_partition_order is validated but ignored: every
+            subframe codes one partition, with output identical to a build
+            that has partitioning but leaves it off.
+
 endmenu

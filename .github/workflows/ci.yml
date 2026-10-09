@@ -200,11 +200,16 @@ jobs:
       - name: Run tests
         run: python3 host_examples/flac_to_wav/test_flac_decoder.py --categories subset --build-dir build ${{ matrix.args }}
 
-  # The encoder's round trips: every encode decodes back bit-exactly.
+  # Every compile-time switch combination round-trips: a build without a
+  # feature must still encode everything else correctly.
   encoder-test:
-    name: "Test: FLAC encode"
+    name: "Test: FLAC encode (partitions=${{ matrix.partitions }})"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        partitions: ['ON', 'OFF']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -238,6 +243,7 @@ jobs:
         run: |
           for example in flac_to_wav wav_to_flac; do
             cmake -B host_examples/$example/build -DENABLE_SANITIZERS=ON -DENABLE_WERROR=ON \
+              -DMICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS=${{ matrix.partitions }} \
               host_examples/$example
             cmake --build host_examples/$example/build -j"$(nproc)"
           done
@@ -245,8 +251,10 @@ jobs:
       - name: Run round-trip tests
         run: python3 host_examples/wav_to_flac/test_flac_encoder.py
 
-  encoder-unit:
-    name: "Encoder unit tests"
+  # The encoder's compile-time switches, each with its unit tests (which adapt to
+  # what a build leaves out).
+  encoder-switches:
+    name: "Encoder switches"
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -259,9 +267,16 @@ jobs:
 
       - name: Build and run unit tests
         run: |
-          cmake -B build -DENABLE_WERROR=ON tests/encoder
-          cmake --build build -j"$(nproc)"
-          ctest --test-dir build --output-on-failure
+          for partitions in ON OFF; do
+            echo "::group::RICE_PARTITIONS=$partitions"
+            dir="build-$partitions"
+            cmake -B "$dir" -DENABLE_WERROR=ON \
+              -DMICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS="$partitions" \
+              tests/encoder
+            cmake --build "$dir" -j"$(nproc)"
+            ctest --test-dir "$dir" --output-on-failure
+            echo "::endgroup::"
+          done
 
   fuzz:
     name: Fuzz build
@@ -354,7 +369,7 @@ jobs:
       - build
       - test
       - encoder-test
-      - encoder-unit
+      - encoder-switches
       - fuzz
       - platformio
     runs-on: ubuntu-latest

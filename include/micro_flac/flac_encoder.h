@@ -84,6 +84,14 @@ struct FLACEncoderOptions {
     /// [FLACEncoder::MIN_BLOCK_SIZE, FLACEncoder::MAX_BLOCK_SIZE].
     uint32_t block_size{4096};
 
+    /// Largest Rice partition order tried, in [0,
+    /// FLACEncoder::MAX_RICE_PARTITION_ORDER]; 0 codes each subframe with one
+    /// Rice parameter. Partitioning (RFC 9639 SS9.2.7) gives each of up to
+    /// 2^order stretches of a subframe its own parameter. It pays off mostly
+    /// at large blocks: order 6 makes music about 1% smaller at 4096 samples,
+    /// for about 19% more encode time on an ESP32-S3.
+    uint8_t max_rice_partition_order{0};
+
     /// Code a subframe whose samples all end in the same k zero bits as
     /// (depth - k)-bit samples (RFC 9639 SS9.2.2), as with 16-bit audio in a
     /// 24-bit stream. Costs 1-3% on an ESP32-S3.
@@ -113,7 +121,7 @@ struct FLACEncoderOptions {
  *          thread.
  *
  * @note The encoder never allocates; its working memory is the object itself
- *       (about 2.1 KB), plus up to about 1.6 KB of task stack inside
+ *       (about 2.1 KB), plus up to about 2.3 KB of task stack inside
  *       encode() and finish(). The constructor always succeeds, and an
  *       unsupported configuration is reported by the first write_header(),
  *       encode() or finish() call as FLAC_ENCODER_ERROR_BAD_CONFIG. To
@@ -185,6 +193,19 @@ public:
 
     /// @brief Largest FLACEncoderOptions::block_size accepted (16-bit field)
     static constexpr uint32_t MAX_BLOCK_SIZE = 65535;
+
+    /// @brief Largest FLACEncoderOptions::max_rice_partition_order accepted
+    static constexpr uint8_t MAX_RICE_PARTITION_ORDER = 6;
+
+    /// @brief Whether this build includes Rice partitioning
+    ///
+    /// Without it (MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS),
+    /// FLACEncoderOptions::max_rice_partition_order is validated, then ignored.
+#ifdef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+    static constexpr bool RICE_PARTITIONS_AVAILABLE = false;
+#else
+    static constexpr bool RICE_PARTITIONS_AVAILABLE = true;
+#endif
 
     // ========================================
     // Lifecycle
@@ -428,6 +449,7 @@ private:
     uint8_t sample_rate_code_{0};           // Frame header sample-rate code
     uint8_t sample_rate_extra_[2]{};        // Its extra bytes, big-endian
     uint8_t sample_rate_extra_len_{0};      // 0, 1, or 2
+    uint8_t max_partition_order_{0};        // Largest Rice partition order tried; 0 when off
     bool finished_{false};                  // Whether finish() has ended this stream
     bool stereo_estimation_enabled_{true};  // false forces independent stereo; set only by
                                             // test_encoder_config (-fno-access-control)

@@ -51,6 +51,12 @@ function(flac_configure_esp_idf COMPONENT_LIB COMPONENT_DIR)
         target_compile_definitions(${COMPONENT_LIB} PUBLIC MICRO_FLAC_DISABLE_OGG)
     endif()
 
+    # Compile encoder features out if their Kconfig options are off. PUBLIC:
+    # flac_encoder.h reads them (FLACEncoder::RICE_PARTITIONS_AVAILABLE).
+    if(NOT CONFIG_MICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS)
+        target_compile_definitions(${COMPONENT_LIB} PUBLIC MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS)
+    endif()
+
     # C++ standard
     target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_14)
 

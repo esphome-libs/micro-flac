@@ -811,24 +811,297 @@ FLAC_NOINLINE void write_verbatim_subframe(BitWriterLocal& bw, const PackedSigna
 
 // FIXED subframe header (RFC 9639 SS9.2.5) through the first Rice parameter
 FLAC_ALWAYS_INLINE void write_fixed_header(BitWriterLocal& bw, const PackedSignal& signal,
-                                           uint8_t bps8, uint8_t order, uint8_t k,
-                                           uint32_t parameter_bits) {
+                                           uint8_t bps8, uint8_t order, uint8_t partition_order,
+                                           uint8_t k, uint32_t parameter_bits) {
     write_subframe_header(bw, static_cast<uint8_t>(SUBFRAME_TYPE_FIXED_MIN + order),
                           signal.wasted_bits());
     for (uint32_t i = 0; i < order; i++) {
         write_uint(bw, static_cast<uint32_t>(signal.warmup_sample(i)), bps8);
     }
     write_coding_method(bw, parameter_bits);
-    write_uint(bw, 0, RICE_PARTITION_ORDER_BITS);  // One partition
+    write_uint(bw, partition_order, RICE_PARTITION_ORDER_BITS);
     write_uint(bw, k, static_cast<uint8_t>(parameter_bits));
 }
 
-// Write one subframe at depth bps: CONSTANT, FIXED, or VERBATIM when FIXED
-// cannot be proven smaller.
+// ----------------------------------------------------------------------------
+// Rice partitioning (FLACEncoderOptions::max_rice_partition_order)
+// ----------------------------------------------------------------------------
+//
+// A subframe's residuals can be split into 2^p equal partitions, the first
+// short by the predictor order, each with its own Rice parameter (RFC 9639
+// SS9.2.7). It is chosen after the predictor, in Pass B: one walk sums the
+// residual magnitudes per partition at the highest order allowed (the
+// leaves), and choose_partitions() prices every order from those sums,
+// merging neighbors bottom-up as libFLAC does. Pass A is unchanged. The size
+// bound holds partition by partition, so estimate + (n - order) / 2 still
+// bounds the subframe.
+//
+// A subframe that does not split takes the single-partition walks, so with
+// partitioning off, every other option runs the same code.
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+
+constexpr uint32_t MAX_PARTITION_ORDER = FLACEncoder::MAX_RICE_PARTITION_ORDER;
+constexpr uint32_t MAX_PARTITIONS = 1U << MAX_PARTITION_ORDER;
+
+// A subframe's Rice coding: 2^order partitions and each one's parameter
+struct RicePartitions {
+    uint8_t order;
+    uint8_t parameter_bits;  // 4, or 5 when any parameter exceeds RICE_PARAMETER_MAX_4BIT
+    uint8_t k[MAX_PARTITIONS];
+};
+
+// Highest partition order up to max_order whose partition count divides n
+// and whose first partition keeps a residual
+FLAC_ALWAYS_INLINE uint32_t partition_order_limit(uint32_t n, uint32_t order, uint32_t max_order) {
+    uint32_t p = 0;
+    while (p < max_order && ((n >> (p + 1)) << (p + 1)) == n && (n >> (p + 1)) > order) {
+        p++;
+    }
+    return p;
+}
+
+// Residual magnitude sums per leaf partition, filled by one walk. Positions
+// are sample indices.
+struct LeafSums {
+    uint64_t sum[MAX_PARTITIONS];
+    uint32_t len;    // Samples per leaf
+    uint32_t end;    // Where the current leaf ends
+    uint32_t pos;    // Where the walk stands
+    uint32_t index;  // The current leaf
+};
+
+// Start leaf sums for an n-sample subframe split 2^p ways, walking from `pos`
+FLAC_ALWAYS_INLINE void leaf_sums_begin(LeafSums& sums, uint32_t n, uint32_t p, uint32_t pos) {
+    for (uint32_t i = 0; i < (1U << p); i++) {
+        sums.sum[i] = 0;
+    }
+    sums.len = n >> p;
+    sums.end = sums.len;
+    sums.pos = pos;
+    sums.index = 0;
+}
+
+// Advance to the next leaf at the current one's end, and return how many of
+// the next m positions stay in the leaf
+FLAC_ALWAYS_INLINE uint32_t leaf_step(LeafSums& sums, uint32_t m) {
+    if (sums.pos == sums.end) {
+        sums.index++;
+        sums.end += sums.len;
+    }
+    const uint32_t left = sums.end - sums.pos;
+    return (m < left) ? m : left;
+}
+
+// Choose the cheapest partitioning from leaf sums at order p, merging `sums`
+// in place. Returns the estimated bits of the partition order field,
+// parameters and codes; ties go to the lower order.
+//
+// Any parameter above 14 widens all of them to 5 bits, so when the widest is
+// exactly 15, clamping those partitions to 14 is priced too.
+FLAC_NOINLINE uint64_t choose_partitions(LeafSums& sums, uint32_t n, uint32_t order, uint32_t p,
+                                         RicePartitions& out) {
+    uint64_t best = UINT64_MAX;
+    uint8_t k[MAX_PARTITIONS];
+    for (;;) {
+        const uint32_t parts = 1U << p;
+        const uint32_t len = n >> p;
+        uint64_t bits = RICE_PARTITION_ORDER_BITS;
+        uint32_t max_k = 0;
+        for (uint32_t i = 0; i < parts; i++) {
+            const uint32_t count = (i == 0) ? (len - order) : len;
+            // leaf_sums_begin() zeroed all 2^p leaves; the analyzer cannot
+            // evaluate 1U << p and assumes none
+            // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
+            bits += estimate_rice(sums.sum[i], count, k[i]);
+            max_k = (k[i] > max_k) ? k[i] : max_k;
+        }
+        uint32_t parameter_bits = rice_parameter_bits(max_k);
+        if (max_k == RICE_PARAMETER_MAX_4BIT + 1) {
+            uint64_t clamped = bits;
+            for (uint32_t i = 0; i < parts; i++) {
+                if (k[i] == max_k) {
+                    const uint64_t count = (i == 0) ? (len - order) : len;
+                    const uint64_t doubled = sums.sum[i] << 1;
+                    // Both prices share the c/2 rounding correction
+                    clamped += (count * max_k) + (doubled >> (max_k - 1U));
+                    clamped -= (count * (max_k + 1U)) + (doubled >> max_k);
+                }
+            }
+            if (clamped < bits + parts) {  // 4-bit parameters save a bit per partition
+                bits = clamped;
+                parameter_bits = RICE_PARAMETER_BITS;
+                for (uint32_t i = 0; i < parts; i++) {
+                    k[i] = (k[i] == max_k) ? static_cast<uint8_t>(max_k - 1U) : k[i];
+                }
+            }
+        }
+        bits += static_cast<uint64_t>(parts) * parameter_bits;
+        if (bits <= best) {
+            best = bits;
+            out.order = static_cast<uint8_t>(p);
+            out.parameter_bits = static_cast<uint8_t>(parameter_bits);
+            for (uint32_t i = 0; i < parts; i++) {
+                out.k[i] = k[i];
+            }
+        }
+        if (p == 0) {
+            return best;
+        }
+        for (size_t i = 0; i < parts / 2; i++) {
+            sums.sum[i] = sums.sum[2 * i] + sums.sum[(2 * i) + 1];
+        }
+        p--;
+    }
+}
+
+// Where a walk writing a subframe's Rice codes stands among its partitions
+struct RiceEmitter {
+    const RicePartitions* rice;
+    uint32_t len;    // Samples per partition
+    uint32_t end;    // Where the current partition ends
+    uint32_t pos;    // Sample index of the next residual
+    uint32_t index;  // The current partition
+    bool capacity_proven;
+};
+
+// An emitter for a subframe whose header has written the first parameter
+FLAC_ALWAYS_INLINE RiceEmitter rice_emitter(const RicePartitions& rice, uint32_t n, uint32_t order,
+                                            bool capacity_proven) {
+    const uint32_t len = n >> rice.order;
+    return RiceEmitter{&rice, len, len, order, 0, capacity_proven};
+}
+
+// Write the next m residuals' codes, and each later partition's parameter
+// where it starts
+FLAC_NOINLINE void emit_partitioned(BitWriterLocal& bw, RiceEmitter& e, const int32_t* r,
+                                    uint32_t m) {
+    while (m != 0) {
+        if (e.pos == e.end) {
+            e.index++;
+            e.end += e.len;
+            write_uint(bw, e.rice->k[e.index], e.rice->parameter_bits);
+        }
+        const uint32_t left = e.end - e.pos;
+        const uint32_t take = (m < left) ? m : left;
+        emit_rice_codes(bw, r, take, e.rice->k[e.index], e.capacity_proven);
+        r += take;
+        m -= take;
+        e.pos += take;
+    }
+}
+
+// One sink type for the walks below, so they share their signal's
+// residual_chunks() instantiations instead of each adding five
+struct ResidualSink {
+    void (*fn)(void* context, const int32_t* r, uint32_t m);
+    void* context;
+
+    void operator()(const int32_t* r, uint32_t m) const {
+        this->fn(this->context, r, m);
+    }
+};
+
+// Add the next m residuals to their leaves' sums, in uint32_t partials of at
+// most sum_chunk_samples(bps)
+FLAC_NOINLINE void add_leaf_residuals(LeafSums& sums, const int32_t* r, uint32_t m, uint32_t bps) {
+    const uint32_t run_max = sum_chunk_samples(bps);
+    while (m != 0) {
+        uint32_t take = leaf_step(sums, m);
+        take = (take < run_max) ? take : run_max;
+        ScanPartial partial = 0;
+        for (uint32_t j = 0; j < take; j++) {
+            partial += abs_u32(r[j]);
+        }
+        check_scan_partial(partial);
+        sums.sum[sums.index] += partial;
+        r += take;
+        m -= take;
+        sums.pos += take;
+    }
+}
+
+// Leave the FIXED subframe unpartitioned, at Pass A's parameter and estimate
+FLAC_ALWAYS_INLINE uint64_t unpartitioned_fixed(const ChannelAnalysis& analysis,
+                                                RicePartitions& rice) {
+    rice.order = 0;
+    rice.parameter_bits = static_cast<uint8_t>(rice_parameter_bits(analysis.k));
+    rice.k[0] = analysis.k;
+    return analysis.estimated_bits;
+}
+
+// The partitioning of the FIXED subframe at Pass A's order that Pass B will
+// write, and its estimated size. A split is kept only when its bound proves
+// it smaller than VERBATIM (as write_partitioned_fixed() needs); a dropped
+// split, or a subframe too short to split, leaves analysis.estimated_bits.
+// Out of line so the leaf sums take stack only here.
+FLAC_NOINLINE uint64_t partition_fixed(const PackedSignal& signal, uint32_t bps,
+                                       const ChannelAnalysis& analysis, uint32_t max_order,
+                                       RicePartitions& rice) {
+    const uint32_t n = signal.n;
+    const uint32_t order = analysis.order;
+    const uint32_t p = partition_order_limit(n, order, max_order);
+    if (p == 0) {
+        return unpartitioned_fixed(analysis, rice);
+    }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- leaf_sums_begin() sets it
+    struct Context {
+        LeafSums sums;
+        uint32_t bps;
+    } context;
+    leaf_sums_begin(context.sums, n, p, order);
+    context.bps = bps;
+    const ResidualSink sink{[](void* c, const int32_t* r, uint32_t m) {
+                                Context& x = *static_cast<Context*>(c);
+                                add_leaf_residuals(x.sums, r, m, x.bps);
+                            },
+                            &context};
+    for_each_residual_chunk(signal, analysis.order, sink);
+    const uint64_t bits = SUBFRAME_HEADER_BITS + (static_cast<uint64_t>(order) * bps) +
+                          RESIDUAL_CODING_METHOD_BITS +
+                          choose_partitions(context.sums, n, order, p, rice);
+    if (rice.order != 0 && residual_bits_bound(bits, n, order) >= verbatim_subframe_bits(n, bps)) {
+        return unpartitioned_fixed(analysis, rice);
+    }
+    return bits;
+}
+
+// Write the FIXED subframe partitioned as `rice`, which partition_fixed()
+// kept only when its bound proves it smaller than VERBATIM
+FLAC_NOINLINE void write_partitioned_fixed(BitWriterLocal& bw, const PackedSignal& signal,
+                                           uint32_t bps, uint8_t order, const RicePartitions& rice,
+                                           uint64_t estimated_bits) {
+    const uint32_t n = signal.n;
+    const uint64_t bound = residual_bits_bound(estimated_bits, n, order);
+    struct Context {
+        BitWriterLocal* bw;
+        RiceEmitter emitter;
+    } context{&bw, rice_emitter(rice, n, order, capacity_for(bw, bound + signal.wasted_bits()))};
+    write_fixed_header(bw, signal, static_cast<uint8_t>(bps), order, rice.order, rice.k[0],
+                       rice.parameter_bits);
+    const ResidualSink sink{[](void* c, const int32_t* r, uint32_t m) {
+                                Context& x = *static_cast<Context*>(c);
+                                emit_partitioned(*x.bw, x.emitter, r, m);
+                            },
+                            &context};
+    for_each_residual_chunk(signal, order, sink);
+}
+
+#endif  // MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+
+// How Pass B codes a frame's subframes. A build without partitioning reads
+// none of the fields.
+struct SubframeSettings {
+    uint32_t max_partition_order;  // cppcheck-suppress unusedStructMember
+};
+
+// Write one subframe at depth bps: CONSTANT, FIXED (at its best
+// partitioning), or VERBATIM when FIXED cannot be proven smaller.
 //
 // Out of line: encode_frame() calls it from three places.
 FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal, uint32_t bps,
-                                  const ChannelAnalysis& analysis) {
+                                  const ChannelAnalysis& analysis,
+                                  const SubframeSettings& settings) {
     const uint8_t bps8 = static_cast<uint8_t>(bps);
 
     if (analysis.is_constant) {
@@ -837,6 +1110,21 @@ FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal
         write_uint(bw, static_cast<uint32_t>(analysis.constant_value), bps8);
         return;
     }
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+    if (settings.max_partition_order != 0) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- partition_fixed() sets it
+        RicePartitions rice;
+        const uint64_t fixed_bits =
+            partition_fixed(signal, bps, analysis, settings.max_partition_order, rice);
+        if (rice.order != 0) {
+            write_partitioned_fixed(bw, signal, bps, analysis.order, rice, fixed_bits);
+            return;
+        }
+    }
+#else
+    (void)settings;
+#endif
 
     const uint64_t budget = fixed_subframe_budget(signal, bps, analysis);
     if (FLAC_UNLIKELY(budget == 0)) {
@@ -850,7 +1138,7 @@ FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal
 
     const uint8_t order = analysis.order;
     const uint8_t k = analysis.k;
-    write_fixed_header(bw, signal, bps8, order, k, rice_parameter_bits(k));
+    write_fixed_header(bw, signal, bps8, order, 0, k, rice_parameter_bits(k));
 
     for_each_residual_chunk(signal, order, [&](const int32_t* r, uint32_t m) {
         emit_rice_codes(bw, r, m, k, capacity_proven);
@@ -1065,6 +1353,7 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     this->sample_rate_extra_[0] = 0;
     this->sample_rate_extra_[1] = 0;
     this->sample_rate_extra_len_ = 0;
+    this->max_partition_order_ = 0;
 
     // Only validates and precomputes; config_result_ stays BAD_CONFIG unless
     // everything checks out.
@@ -1081,6 +1370,9 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     if (block_size < MIN_BLOCK_SIZE || block_size > MAX_BLOCK_SIZE) {
         return;
     }
+    if (options.max_rice_partition_order > MAX_RICE_PARTITION_ORDER) {
+        return;
+    }
     SampleRateCode rate;
     if (!select_sample_rate_code(format.sample_rate(), rate)) {
         return;
@@ -1091,6 +1383,9 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     this->sample_rate_extra_[0] = rate.extra[0];
     this->sample_rate_extra_[1] = rate.extra[1];
     this->sample_rate_extra_len_ = rate.extra_len;
+#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+    this->max_partition_order_ = options.max_rice_partition_order;
+#endif
 
     // The worst frame is all VERBATIM (see fixed_subframe_budget()), with a
     // stereo side subframe one bit deeper. Per channel: a subframe header
@@ -1199,6 +1494,7 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     // Each signal of this frame is `base` with its channel or candidate set
     const PackedSignal base{input, num_samples,    bps, bytes,     nch,
                             0,     SignalId::LEFT, a,   chunk_len, 0};
+    const SubframeSettings settings{this->max_partition_order_};
     const bool find_wasted = this->options_.wasted_bits;
 
     if (nch != 2) {
@@ -1230,7 +1526,7 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
             }
             const ChannelAnalysis analysis =
                 finish_wasted_analysis(scan, num_samples, bps, bits, signal.wasted);
-            write_subframe(bw, signal, bps - signal.wasted, analysis);
+            write_subframe(bw, signal, bps - signal.wasted, analysis, settings);
         }
 
         return this->finish_frame(close_frame(bw, output), num_samples, bytes_written);
@@ -1307,11 +1603,11 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     PackedSignal signal0 = base;
     signal0.sig = plan.sig0;
     signal0.wasted = wasted[static_cast<uint32_t>(plan.sig0)];
-    write_subframe(bw, signal0, plan.bps0 - signal0.wasted, plan.analysis0);
+    write_subframe(bw, signal0, plan.bps0 - signal0.wasted, plan.analysis0, settings);
     PackedSignal signal1 = base;
     signal1.sig = plan.sig1;
     signal1.wasted = wasted[static_cast<uint32_t>(plan.sig1)];
-    write_subframe(bw, signal1, plan.bps1 - signal1.wasted, plan.analysis1);
+    write_subframe(bw, signal1, plan.bps1 - signal1.wasted, plan.analysis1, settings);
 
     return this->finish_frame(close_frame(bw, output), num_samples, bytes_written);
 }

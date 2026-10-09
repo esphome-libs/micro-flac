@@ -152,13 +152,27 @@ void check_config_validation() {
     }
 
     {
+        // Validated the same way whether or not the build has partitioning.
+        FLACEncoderOptions partitioned = defaults;
+        partitioned.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER;
+        check("max_rice_partition_order 6 (max)", first_use(make_format(2, 16), partitioned),
+              FLAC_ENCODER_SUCCESS);
+        check("max_rice_partition_order 6 on 24-bit 5 ch",
+              first_use(make_format(5, 24), partitioned), FLAC_ENCODER_SUCCESS);
+        partitioned.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER + 1;
+        check("max_rice_partition_order 7 (above max)", first_use(make_format(2, 16), partitioned),
+              FLAC_ENCODER_ERROR_BAD_CONFIG);
+    }
+
+    {
         // get_options() hands back the options as passed, even ones a build ignores
         FLACEncoderOptions options = make_options(1152);
+        options.max_rice_partition_order = 3;
         options.wasted_bits = false;
         const FLACEncoder e(make_format(2, 16), options);
         const FLACEncoderOptions& got = e.get_options();
         check_true("get_options() returns the options passed",
-                   got.block_size == 1152 && !got.wasted_bits);
+                   got.block_size == 1152 && got.max_rice_partition_order == 3 && !got.wasted_bits);
     }
 
     std::printf("\nUnsupported configurations fail every call until reconfigured:\n");
@@ -830,6 +844,7 @@ bool matches_fresh(const FLACEncoder& e, const PcmFormat& format,
         e.sample_rate_extra_[0] == fresh.sample_rate_extra_[0] &&
         e.sample_rate_extra_[1] == fresh.sample_rate_extra_[1] &&
         e.sample_rate_extra_len_ == fresh.sample_rate_extra_len_ &&
+        e.max_partition_order_ == fresh.max_partition_order_ &&
         e.total_samples_ == fresh.total_samples_ && e.frame_number_ == fresh.frame_number_ &&
         e.min_frame_bytes_ == fresh.min_frame_bytes_ &&
         e.max_frame_bytes_ == fresh.max_frame_bytes_ && e.finished_ == fresh.finished_ &&
@@ -837,6 +852,7 @@ bool matches_fresh(const FLACEncoder& e, const PcmFormat& format,
         e.get_pcm_format().num_channels() == format.num_channels() &&
         e.get_pcm_format().bits_per_sample() == format.bits_per_sample() &&
         e.get_options().block_size == options.block_size &&
+        e.get_options().max_rice_partition_order == options.max_rice_partition_order &&
         e.get_options().wasted_bits == options.wasted_bits;
     return same;
 }
@@ -856,12 +872,14 @@ bool encodes_like_fresh(FLACEncoder& e, const PcmFormat& format, const FLACEncod
 void check_reconfigure() {
     std::printf("\nreset(format, options) leaves the encoder as the constructor would:\n");
 
-    // Rich: a sample rate carried in two extra header bytes (code 13), so every
-    // derived field is set
+    // Rich: a sample rate carried in two extra header bytes (code 13) and
+    // partitioning, so every derived field is set (where the build compiles
+    // partitioning in)
     const PcmFormat rich = make_format(2, 16, 22051);
     FLACEncoderOptions rich_options = make_options(1152);
+    rich_options.max_rice_partition_order = 4;
     // Plain: mono 24-bit at a table rate with every option off, wasted-bits
-    // detection included, so stale options would show
+    // detection included, so stale partitioning and options would show
     const PcmFormat plain = make_format(1, 24, 48000);
     FLACEncoderOptions plain_options = make_options(BLOCK);
     plain_options.wasted_bits = false;
@@ -1098,6 +1116,159 @@ size_t encoded_size(const PcmFormat& format, const FLACEncoderOptions& options,
 }
 
 // ============================================================================
+// Rice partitioning
+// ============================================================================
+
+FLACEncoderOptions make_partition_options(uint32_t block_size) {
+    FLACEncoderOptions options = make_options(block_size);
+    options.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER;
+    return options;
+}
+
+// A tone under noise whose level changes every 256 samples, from none to
+// about 1/1000 of full scale: what partitioning exists for, since one Rice
+// parameter per subframe then fits no stretch of it well. Packed with the
+// unused low bits clear, so it is also the expected decoder output.
+std::vector<uint8_t> make_bursty(uint32_t n, uint32_t channels, uint32_t bits) {
+    const uint32_t bytes = (bits + 7) / 8;
+    const double amp = static_cast<double>(1U << (bits - 1)) / 4.0;
+    const uint32_t noise_span = (bits > 10) ? (1U << (bits - 10)) : 1U;
+    static const uint32_t SHIFTS[] = {0, 6, 2, 9, 1, 4, 11, 3};
+    std::vector<uint8_t> out(static_cast<size_t>(n) * channels * bytes);
+    uint32_t state = 0x2545F491U;
+    size_t pos = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t span = noise_span >> SHIFTS[(i / 256) % 8];
+        for (uint32_t c = 0; c < channels; c++) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            const double t = static_cast<double>(i);
+            const double phase = static_cast<double>(c);
+            const double v = (0.55 * std::sin((t / 97.3) + phase)) +
+                             (0.3 * std::sin((t / 23.1) + (2.0 * phase))) +
+                             (0.15 * std::sin(t / 7.7));
+            const int32_t noise =
+                (span > 1) ? static_cast<int32_t>(state % span) - static_cast<int32_t>(span / 2)
+                           : 0;
+            pack_sample(&out[pos], static_cast<int32_t>(amp * v) + noise, bits, bytes, 0);
+            pos += bytes;
+        }
+    }
+    return out;
+}
+
+void check_partitions() {
+    std::printf("\nRice partitioning (FLACEncoderOptions::max_rice_partition_order):\n");
+
+    // Round trips at order 6 at every depth, at block sizes that allow up to 2 (16, with an order-4
+    // predictor), 8 (1000 = 8 * 125) and 64 (192 with a predictor of order 2 or less; 4096)
+    // partitions; the 7-sample final frame cannot be split at all.
+    const int failures_before = failures;
+    for (const uint32_t bits : {4U, 8U, 12U, 16U, 20U, 24U}) {
+        for (const uint32_t channels : {1U, 2U, 5U}) {
+            for (const uint32_t block : {16U, 192U, 1000U, 4096U}) {
+                const uint32_t frames = (block * 3) + 7;
+                const FLACEncoderOptions options = make_partition_options(block);
+                char label[96];
+                std::snprintf(label, sizeof(label), "%u-bit %u ch block %u bursty", bits, channels,
+                              block);
+                const std::vector<uint8_t> bursty = make_bursty(frames, channels, bits);
+                FLACEncoder bursty_encoder(make_format(channels, bits), options);
+                if (!encode_decode_matches(bursty_encoder, bursty, bursty, frames, label)) {
+                    failures++;
+                    std::printf("  %-44s <-- FAIL\n", label);
+                }
+                std::snprintf(label, sizeof(label), "%u-bit %u ch block %u mixed", bits, channels,
+                              block);
+                std::vector<uint8_t> packed;
+                std::vector<uint8_t> expected;
+                make_signal(frames, channels, bits, packed, expected);
+                FLACEncoder mixed_encoder(make_format(channels, bits), options);
+                if (!encode_decode_matches(mixed_encoder, packed, expected, frames, label)) {
+                    failures++;
+                    std::printf("  %-44s <-- FAIL\n", label);
+                }
+            }
+        }
+    }
+    std::printf("  {4-24}-bit x {1, 2, 5} ch x 4 block sizes: %s\n",
+                failures == failures_before ? "all bit-exact" : "see failures above");
+
+    // It has to pay off on bursty input; a build without partitioning must
+    // instead ignore the option, byte for byte.
+    for (const uint32_t bits : {12U, 16U, 24U}) {
+        for (const uint32_t channels : {1U, 2U, 5U}) {
+            const uint32_t frames = BLOCK * 3;
+            const std::vector<uint8_t> bursty = make_bursty(frames, channels, bits);
+            FLACEncoderOptions plain = make_partition_options(BLOCK);
+            plain.max_rice_partition_order = 0;
+            FLACEncoderOptions partitioned = make_partition_options(BLOCK);
+            std::vector<uint8_t> without;
+            std::vector<uint8_t> with;
+            encoded_size(make_format(channels, bits), plain, bursty, &without);
+            encoded_size(make_format(channels, bits), partitioned, bursty, &with);
+            char label[128];
+            if (FLACEncoder::RICE_PARTITIONS_AVAILABLE) {
+                std::snprintf(label, sizeof(label),
+                              "%u-bit %u ch bursty: partitions smaller (%zu vs %zu)", bits,
+                              channels, with.size(), without.size());
+                check_true(label, !with.empty() && with.size() < without.size());
+            } else {
+                std::snprintf(label, sizeof(label),
+                              "%u-bit %u ch: partitions ignored (built without)", bits, channels);
+                check_true(label, !without.empty() && with == without);
+            }
+        }
+    }
+
+    // Signals whose partitioned bound cannot prove FIXED smaller than
+    // VERBATIM (full-scale noise and alternation, at the deepest subframes
+    // each path codes), silence and DC.
+    struct Extreme {
+        const char* name;
+        int32_t (*sample)(uint32_t i, uint32_t c, int32_t peak, uint32_t noise);
+    };
+    static const Extreme EXTREMES[] = {
+        {"full-scale noise",
+         [](uint32_t, uint32_t, int32_t peak, uint32_t noise) {
+             return static_cast<int32_t>(noise % (2U * static_cast<uint32_t>(peak))) - peak;
+         }},
+        {"alternation in antiphase",
+         [](uint32_t i, uint32_t c, int32_t peak, uint32_t) {
+             return ((i + c) % 2 == 0) ? peak : -peak - 1;
+         }},
+        {"silence", [](uint32_t, uint32_t, int32_t, uint32_t) { return 0; }},
+        {"DC", [](uint32_t, uint32_t, int32_t, uint32_t) { return -1234; }},
+    };
+    const uint32_t frames = (BLOCK * 2) + 7;
+    for (const Extreme& x : EXTREMES) {
+        for (const uint32_t bits : {16U, 24U}) {
+            for (const uint32_t channels : {1U, 2U}) {
+                const uint32_t bytes = (bits + 7) / 8;
+                const int32_t peak = static_cast<int32_t>((1U << (bits - 1)) - 1U);
+                std::vector<uint8_t> packed(static_cast<size_t>(frames) * channels * bytes);
+                uint32_t state = 0x9E3779B9U;
+                size_t pos = 0;
+                for (uint32_t i = 0; i < frames; i++) {
+                    for (uint32_t c = 0; c < channels; c++) {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        pack_sample(&packed[pos], x.sample(i, c, peak, state), bits, bytes, 0);
+                        pos += bytes;
+                    }
+                }
+                char label[96];
+                std::snprintf(label, sizeof(label), "%u-bit %u ch %s", bits, channels, x.name);
+                FLACEncoder encoder(make_format(channels, bits), make_partition_options(BLOCK));
+                check_true(label, encode_decode_matches(encoder, packed, packed, frames, label));
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Wasted bits
 // ============================================================================
 
@@ -1140,7 +1311,8 @@ void check_wasted_bits() {
 
     // Round trips across formats, with every channel sharing 1, 4 or 8
     // wasted bits, with a different count per channel (so mid and side get
-    // their own), and with one channel silent. The option on and off; and
+    // their own), and with one channel silent. Fixed predictors with and
+    // without partitions; the option off; and
     // forced independent stereo, whose Pass A finds left's and right's
     // wasted bits without deriving mid and side.
     struct Format {
@@ -1166,8 +1338,11 @@ void check_wasted_bits() {
             for (const uint32_t block : {1152U, 4096U}) {
                 const uint32_t n = (2 * block) + 7;
                 const std::vector<uint8_t> input = make_wasted(n, f.channels, f.bits, wasted);
-                for (const uint32_t opt : {0U, 4U, 5U}) {
+                for (const uint32_t opt : {0U, 1U, 4U, 5U}) {
                     FLACEncoderOptions options = make_options(block);
+                    if (opt == 1) {
+                        options.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER;
+                    }
                     options.wasted_bits = (opt != 4);
                     char label[96];
                     std::snprintf(label, sizeof(label), "%uch %u-bit shape %u block %u opt %u",
@@ -1184,7 +1359,7 @@ void check_wasted_bits() {
         }
     }
     std::printf(
-        "  %u round trips (10 formats x 5 wasted-bit shapes x 2 block sizes x 3 options): %s\n",
+        "  %u round trips (10 formats x 5 wasted-bit shapes x 2 block sizes x 4 options): %s\n",
         cases, failures == failures_before ? "all bit-exact" : "see failures above");
 
     // 16-bit audio finds its wasted bits like every other depth. 8-bit audio
@@ -1220,14 +1395,17 @@ void check_wasted_bits() {
     const uint32_t none[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     const uint32_t eight[8] = {8, 8, 8, 8, 8, 8, 8, 8};
     const uint32_t n = (3 * 4096) + 7;
-    {
-        const FLACEncoderOptions options = make_options(4096);
+    for (const uint32_t partitions : {0U, 6U}) {
+        FLACEncoderOptions options = make_options(4096);
+        options.max_rice_partition_order = static_cast<uint8_t>(partitions);
         const size_t size16 =
             encoded_size(make_format(1, 16), options, make_wasted(n, 1, 16, none));
         const size_t size24 =
             encoded_size(make_format(1, 24), options, make_wasted(n, 1, 24, eight));
-        check("16-bit mono in 24 bits: bytes over 16-bit",
-              static_cast<long long>(size24) - static_cast<long long>(size16), 4);
+        char what[96];
+        std::snprintf(what, sizeof(what), "16-bit mono in 24 bits, r%u: bytes over 16-bit",
+                      partitions);
+        check(what, static_cast<long long>(size24) - static_cast<long long>(size16), 4);
     }
 
     // Stereo 16-bit audio in 24 bits: within the 16-bit stream plus one bit
@@ -1253,16 +1431,20 @@ void check_wasted_bits() {
     // Without wasted bits the option changes nothing, byte for byte.
     int identical_failures = 0;
     for (const Format& f : formats) {
-        FLACEncoderOptions options = make_options(4096);
-        const std::vector<uint8_t> input = make_wasted(n, f.channels, f.bits, none);
-        std::vector<uint8_t> on;
-        std::vector<uint8_t> off;
-        encoded_size(make_format(f.channels, f.bits), options, input, &on);
-        options.wasted_bits = false;
-        encoded_size(make_format(f.channels, f.bits), options, input, &off);
-        if (on != off || on.empty()) {
-            identical_failures++;
-            std::printf("  %uch %u-bit: output differs with the option on\n", f.channels, f.bits);
+        for (const bool partitioned : {false, true}) {
+            FLACEncoderOptions options = make_options(4096);
+            options.max_rice_partition_order = partitioned ? 6 : 0;
+            const std::vector<uint8_t> input = make_wasted(n, f.channels, f.bits, none);
+            std::vector<uint8_t> on;
+            std::vector<uint8_t> off;
+            encoded_size(make_format(f.channels, f.bits), options, input, &on);
+            options.wasted_bits = false;
+            encoded_size(make_format(f.channels, f.bits), options, input, &off);
+            if (on != off || on.empty()) {
+                identical_failures++;
+                std::printf("  %uch %u-bit partitions %d: output differs with the option on\n",
+                            f.channels, f.bits, partitioned ? 1 : 0);
+            }
         }
     }
     check("  formats whose output changes without wasted bits", identical_failures, 0);
@@ -1329,6 +1511,7 @@ int main() {  // NOLINT(bugprone-exception-escape)
     check_odd_depth_round_trips();
     check_unaligned_input_end();
     check_scan_worst_case();
+    check_partitions();
     check_wasted_bits();
 
     if (failures != 0) {

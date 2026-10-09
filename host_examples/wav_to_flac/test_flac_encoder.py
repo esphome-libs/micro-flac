@@ -818,6 +818,11 @@ def main():
         action="store_true",
         help="Skip the bit-depth (8/24-bit) and channel-count (3-8) matrix",
     )
+    parser.add_argument(
+        "--skip-partitions",
+        action="store_true",
+        help="Skip the Rice partitioning (--partition-order) pass",
+    )
     args = parser.parse_args()
 
     WAV_TO_FLAC = (
@@ -910,10 +915,23 @@ def main():
     # block-size table entry; 1000 is not (16-bit escape code), and leaves a
     # 50-sample final frame from the half-second sources.
     depth_channel_block_sizes = [4096, 1000]
+    # The Rice partitioning pass: the highest order at block sizes that allow
+    # different partition counts (16: at most 2 with an order-4 predictor;
+    # 1000 = 8 * 125: at most 8; 1152: at most 64); then the final-frame edge
+    # cases (odd and short frames, which cannot be split) and the depth/channel
+    # matrix.
+    partition_matrix = [
+        (["--partition-order", "6"], bs) for bs in (16, 1000, 1152, 4096)
+    ]
+    if args.skip_partitions:
+        skip_notes.append("--skip-partitions passed -- Rice partitioning pass skipped")
+        partition_matrix = []
     total_cases = (
         len(all_matrix_sources) * len(block_sizes)
         + len(short_tail_sources)
         + len(depth_channel_sources) * len(depth_channel_block_sizes)
+        + len(all_matrix_sources) * len(partition_matrix)
+        + (len(short_tail_sources) + len(depth_channel_sources) if partition_matrix else 0)
     )
     case_idx = 0
 
@@ -960,6 +978,44 @@ def main():
                     f"    [{case_idx}/{total_cases}] block-size={bs}..."
                     f" {result.message.split(' - ')[0]}"
                 )
+
+    # ------------------------------------------------------------------
+    # Rice partitioning (FLACEncoderOptions::max_rice_partition_order)
+    # ------------------------------------------------------------------
+    if partition_matrix:
+        print()
+        print("=" * 40)
+        print("RICE PARTITIONING")
+        print("=" * 40)
+        for source in all_matrix_sources:
+            print(f"\n  {source.name} ({source.channels}ch)...")
+            for part_args, bs in partition_matrix:
+                case_idx += 1
+                tag = "part" + "".join(a.strip("-") for a in part_args) + f"_bs{bs}"
+                result = run_case(source, part_args + ["--block-size", str(bs)], tag, block_size=bs)
+                all_results.append(result)
+                print(
+                    f"    [{case_idx}/{total_cases}] {' '.join(part_args)} block-size={bs}..."
+                    f" {result.message.split(' - ')[0]}"
+                )
+        tail_args = ["--partition-order", "6", "--block-size", "4096"]
+        for source in short_tail_sources:
+            case_idx += 1
+            result = run_case(source, tail_args, "part_shorttail", block_size=4096)
+            all_results.append(result)
+            print(
+                f"  [{case_idx}/{total_cases}] {source.name} --partition-order 6..."
+                f" {result.message.split(' - ')[0]}"
+            )
+        depth_args = ["--partition-order", "6", "--block-size", "4096"]
+        for source in depth_channel_sources:
+            case_idx += 1
+            result = run_case(source, depth_args, "part_bs4096", block_size=4096)
+            all_results.append(result)
+            print(
+                f"  [{case_idx}/{total_cases}] {source.name} ({source.channels}ch, {source.bits}-bit)"
+                f" --partition-order 6... {result.message.split(' - ')[0]}"
+            )
 
     # ------------------------------------------------------------------
     # Report + summary

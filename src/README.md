@@ -138,9 +138,17 @@ Fixed-predictor residuals are computed as a running difference cascade: the orde
 - **Pass A (analysis)**: `scan_range()` walks each candidate signal once (mono or each channel; for stereo, left, right, mid and side), summing `|e_o|` for orders 0-4 in one loop. A constant signal shows up as a zero order-1 sum. `estimate_rice_bits()` prices each order at the better of two Rice parameters, and the cheapest wins, capped at VERBATIM's size. For stereo, `choose_stereo_plan()` picks the cheapest of the four channel assignments, with side coded one bit deeper. The loop accumulates 32-bit partial sums, spilled at intervals proven overflow-free for the depth (`sum_chunk_samples()`); builds defining `MICRO_FLAC_CHECK_SCAN_SUMS` check that proof at run time.
 - **Pass B (emission)**: `write_subframe()` writes each chosen signal's subframe in one walk, at Pass A's Rice parameter. There is no exact cost pass. Since `zigzag(r) <= 2|r|`, a subframe's exact size is at most Pass A's estimate plus half a bit per residual (`fixed_subframe_bits_bound()`). When that bound is below VERBATIM's size, FIXED is written and the bound proves the output capacity once for the unchecked `write_rice_block()`. Otherwise the residuals are priced exactly and VERBATIM is written unless FIXED is strictly smaller. Never writing a subframe larger than VERBATIM is what makes `get_max_output_bytes()` a hard bound.
 
+### Rice Partitioning
+
+With `FLACEncoderOptions::max_rice_partition_order`, a subframe's residuals may be split into 2^p partitions, each with its own Rice parameter (RFC 9639 §9.2.7). It is chosen after the predictor, in Pass B: one walk sums the residual magnitudes per leaf partition at the highest order allowed, and `choose_partitions()` prices every order from those sums, merging neighbors bottom-up. The size bound holds partition by partition. A subframe that does not split takes the single-partition code, so with partitioning off every other option runs unchanged.
+
 ### Wasted Bits
 
 With `FLACEncoderOptions::wasted_bits`, a subframe whose samples all end in the same k zero bits is coded k bits shallower (RFC 9639 §9.2.2). Pass A finds k as the trailing zeros of the OR of each candidate's samples. Every residual of the shifted signal is the original's divided by 2^k, so the sums are rescaled rather than rescanned, and Pass B folds the shift into the unpacking. Mid is detected from its own samples: when left and right share k wasted bits, mid may keep only k - 1, because the decoder rebuilds mid's dropped low bit from side's. The unary count in the subframe header is the same for every coding of a signal, so the estimates leave it out and only the capacity checks add it.
+
+### Compile-Time Switches
+
+`MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS` (Kconfig `MICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS`, host CMake option of the same name) compiles partitioning out. `max_rice_partition_order` is then validated and ignored. It is a PUBLIC definition because `flac_encoder.h` reads it to report it (`FLACEncoder::RICE_PARTITIONS_AVAILABLE`).
 
 ### Bit Writer Design
 
