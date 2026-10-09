@@ -200,6 +200,24 @@ jobs:
       - name: Run tests
         run: python3 host_examples/flac_to_wav/test_flac_decoder.py --categories subset --build-dir build ${{ matrix.args }}
 
+  encoder-unit:
+    name: "Encoder unit tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+
+      - name: Initialize library submodules
+        run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
+
+      - name: Build and run unit tests
+        run: |
+          cmake -B build -DENABLE_WERROR=ON tests/encoder
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure
+
   fuzz:
     name: Fuzz build
     runs-on: ubuntu-latest
@@ -290,6 +308,7 @@ jobs:
       - cppcheck
       - build
       - test
+      - encoder-unit
       - fuzz
       - platformio
     runs-on: ubuntu-latest

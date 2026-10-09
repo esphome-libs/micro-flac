@@ -40,6 +40,12 @@ python3 test_flac_decoder.py --mode streaming            # Streaming tests only
 python3 test_flac_decoder.py --chunk-sizes 1,64,4096     # Custom chunk sizes
 ```
 
+```bash
+cd tests/encoder
+cmake -B build && cmake --build build
+./build/test_bit_writer                                 # Bit writer unit test (assert-based)
+```
+
 ## Key Architecture Decisions
 
 1. **Namespace**: All code in `micro_flac` namespace
@@ -80,6 +86,14 @@ python3 test_flac_decoder.py --chunk-sizes 1,64,4096     # Custom chunk sizes
    ```bash
    cd examples/decode_benchmark
    pio run -e esp32s3 -t upload -t monitor
+   ```
+
+3. **Encoder unit tests**:
+
+   ```bash
+   cd tests/encoder                 # Unit tests (sanitizers on by default)
+   cmake -B build && cmake --build build
+   ./build/test_bit_writer          # Bit writer unit test
    ```
 
 ### Debugging decode issues

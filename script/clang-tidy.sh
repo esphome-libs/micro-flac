@@ -8,6 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${ROOT_DIR}/host_examples/flac_to_wav/build"
+ENCODER_TESTS_BUILD_DIR="${ROOT_DIR}/tests/encoder/build"
 
 # Find clang-tidy. A pre-set $CLANG_TIDY (CI pins it to clang-tidy-18) wins over PATH discovery.
 CLANG_TIDY="${CLANG_TIDY:-}"
@@ -37,16 +38,49 @@ if ! command -v "$CLANG_TIDY" &> /dev/null; then
     exit 1
 fi
 
-# Ensure compile_commands.json exists
+# Ensure compile_commands.json exists for each project. Each only knows the
+# compile flags for its own sources (flac_to_wav.cpp or the encoder unit
+# tests) plus the shared src/ library, so both databases are needed and merged
+# below.
 if [ ! -f "${BUILD_DIR}/compile_commands.json" ]; then
-    echo "Generating compile_commands.json..."
+    echo "Generating compile_commands.json (flac_to_wav)..."
     cmake -B "$BUILD_DIR" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "${ROOT_DIR}/host_examples/flac_to_wav"
 fi
+if [ ! -f "${ENCODER_TESTS_BUILD_DIR}/compile_commands.json" ]; then
+    echo "Generating compile_commands.json (encoder tests)..."
+    cmake -B "$ENCODER_TESTS_BUILD_DIR" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DENABLE_SANITIZERS=OFF \
+        "${ROOT_DIR}/tests/encoder"
+fi
+
+# Merge the compile_commands.json databases into one directory. Pointing -p at
+# any one of them leaves the other projects' sources with no compile command
+# (clang-tidy falls back to a generic command line and can't resolve their -I
+# path to src/, e.g. "flac_format.h not found"). Entries are deduplicated by
+# file path; src/*.cpp appears in every database with equivalent flags, so
+# any copy is fine.
+MERGED_DIR="${ROOT_DIR}/build/clang-tidy-cdb"
+mkdir -p "$MERGED_DIR"
+python3 -c "
+import json, sys
+
+entries = []
+seen = set()
+for path in sys.argv[1:]:
+    with open(path) as f:
+        for entry in json.load(f):
+            if entry['file'] in seen:
+                continue
+            seen.add(entry['file'])
+            entries.append(entry)
+
+with open('$MERGED_DIR/compile_commands.json', 'w') as f:
+    json.dump(entries, f, indent=2)
+" "${BUILD_DIR}/compile_commands.json" "${ENCODER_TESTS_BUILD_DIR}/compile_commands.json"
 
 # Find all source files, excluding build/ and build-*/ directories (variant
 # build trees, as .gitignore ignores them)
 # Note: examples/ excluded as ESP-IDF code can't be checked without ESP-IDF headers
-SOURCES=$(find "$ROOT_DIR/src" "$ROOT_DIR/host_examples" \
+SOURCES=$(find "$ROOT_DIR/src" "$ROOT_DIR/host_examples" "$ROOT_DIR/tests/encoder" \
     -type d \( -path '*/build' -o -path '*/build-*' \) -prune -o \
     \( -name '*.cpp' -o -name '*.c' \) -print 2>/dev/null || true)
 
@@ -64,4 +98,4 @@ fi
 echo "Running clang-tidy..."
 # --warnings-as-errors keeps the exit code non-zero on any finding even if a
 # repo's .clang-tidy ever loses its WarningsAsErrors line; CI relies on this.
-$CLANG_TIDY -p "$BUILD_DIR" --warnings-as-errors='*' $FIX_FLAG $SOURCES
+$CLANG_TIDY -p "$MERGED_DIR" --warnings-as-errors='*' $FIX_FLAG $SOURCES

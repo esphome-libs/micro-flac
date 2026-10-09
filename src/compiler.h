@@ -99,8 +99,7 @@ namespace micro_flac {
 // Bit Buffer Constants (implementation-only)
 // ============================================================================
 
-// The bit_buffer_t type is defined in flac_decoder.h (public header).
-// These constants and macros are only needed internally by the bit reader implementation.
+// bit_buffer_t (flac_decoder.h) and bit_writer.h's accumulator are this wide.
 // Use a 32-bit bit buffer on 32-bit platforms (Xtensa, ARM32, etc.) and a 64-bit
 // bit buffer on 64-bit platforms to reduce refill frequency.
 #if UINTPTR_MAX == 0xFFFFFFFF

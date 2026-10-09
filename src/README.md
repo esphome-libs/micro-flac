@@ -39,6 +39,7 @@ Based on [Nayuki's Simple FLAC Implementation](https://www.nayuki.io/res/simple-
 - `crc.h` / `crc.cpp` - CRC-8 and CRC-16 lookup tables and functions
 - `alloc.h` - Memory allocation macros (`FLAC_MALLOC` / `FLAC_FREE`) with ESP-IDF PSRAM support
 - `compiler.h` - Compiler hints (optimization, inlining, branch prediction) and bit buffer constants
+- `bit_writer.h` - Header-only MSB-first bit writer on stack-local state (`BitWriterLocal`), mirroring `bit_reader.h`: `write_uint()`, `write_rice()`, `write_zeros()`, and `write_rice_block()`, which skips bounds checks once its caller has proven the capacity. For the encoder
 - `wrapping_arithmetic.h` - uint32_t-based wrapping arithmetic helpers (`wadd32`, `wsub32`, `wshl32`, `wshr32`, `u32`) for FLAC's modulo-2^bps semantics
 
 ## Decode State Machine
