@@ -218,9 +218,9 @@ Available after `decode()` returns `FLAC_DECODER_HEADER_READY` via `decoder.get_
 `FLACEncoder` encodes interleaved 4-24 bit PCM in 1-8 channels to native FLAC with a fixed block size: every frame but the last holds exactly `block_size` samples per channel. It is configured at construction, or later with `reset(format, options)`, from two structs:
 
 - **`PcmFormat`** (`micro_flac/pcm_format.h`) describes the input. Construct it as `PcmFormat{sample_rate, num_channels, bits_per_sample}` (1-1048575 Hz, 1-8 channels, 4-24 bits) and read it back through `sample_rate()`, `num_channels()`, `bits_per_sample()`, `bytes_per_sample()`, `bytes_per_frame()` and `is_valid()`, as in the other micro-* libraries. Samples are interleaved, little-endian, signed and `ceil(bits_per_sample() / 8)` bytes wide, with other depths left-justified (a 12-bit sample fills the top 12 bits of its 2 bytes). This is exactly what the decoder's `uint8_t*` `decode()` produces. 2-byte samples must be 2-byte aligned.
-- **`FLACEncoderOptions`** controls compression:
+- **`FLACEncoderOptions`** controls compression (see [Encoding Performance](#encoding-performance) for the costs):
   - `block_size` (16-65535, default 4096).
-  - `lpc` (default off): also try linear prediction on each subframe, keeping it where it is estimated smaller. Typically 7-9% smaller on 16-bit music. Streams of 17-24 bits use 64-bit arithmetic, much slower on an ESP32.
+  - `lpc` (default off): also try linear prediction on each subframe, keeping it where it is estimated smaller. Typically 7-9% smaller on 16-bit music. Streams of 17-24 bits use 64-bit arithmetic, much slower on an ESP32 (see [Encoding Performance](#encoding-performance)).
   - `max_lpc_order` (1-12, default 8): the highest LPC order tried. Orders 4, 8 and 12 come out about 6.8%, 8.6% and 9% smaller than the fixed predictors alone.
   - `lpc_stereo_search` (default off): with `lpc` on stereo, choose each frame's channel assignment after designing LPC for all four candidates (left, right, mid, side) rather than from the fixed predictors. 0.05-0.25% smaller.
   - `max_rice_partition_order` (0-6, default 0): split each subframe's residuals into up to 2^order partitions with their own Rice parameters. About 1% smaller at block size 4096, 0.3% at 1152.
@@ -285,6 +285,23 @@ Decoding performance for 48kHz stereo audio (full frame, CRC enabled):
 
 ESP32-S3 and ESP32-P4 numbers are measured with the working buffer in PSRAM (the default); PSRAM is fast enough on these chips that switching to internal SRAM only saves ~2-4% on the S3 and well under 1% on the P4. On the original ESP32, PSRAM is much slower than internal SRAM, so placing the working buffer in internal memory (`CONFIG_MICRO_FLAC_PREFER_INTERNAL=y`) is roughly 30-35% faster and is recommended for performance-sensitive use. Performance also varies with block size, prediction order, and sample depth (24-bit requires 64-bit arithmetic). See [examples/decode_benchmark/README.md](examples/decode_benchmark/README.md) for detailed benchmarks, streaming overhead analysis, and instructions for running your own.
 
+### Encoding Performance
+
+Encoding the 30-second 48 kHz stereo clip on an ESP32-S3 at 240 MHz (`examples/encode_benchmark`). Sizes are relative to the default settings at block size 4096.
+
+| Settings | 16-bit | 24-bit | Size |
+| -------- | ------ | ------ | ---- |
+| Defaults, block size 4096 | 21.3x realtime | 15.9x realtime | baseline |
+| Defaults, block size 1152 | 20.9x realtime | 15.7x realtime | same |
+| `max_rice_partition_order` 6 | 17.9x realtime | 13.5x realtime | -0.6% |
+| `lpc`, order 4 | 11.3x realtime | n/a | -4.6% |
+| `lpc`, order 8 | 9.1x realtime | 4.1x realtime | -4.8% |
+| `lpc`, order 12 | 8.1x realtime | n/a | -4.8% |
+| `lpc` order 8 + `lpc_stereo_search` | 6.5x realtime | n/a | -5.2% |
+| `lpc` order 8 + search + partitions | 6.0x realtime | n/a | -5.8% |
+
+On a typical music corpus LPC gains more (7-9%) than on this clip. A host encodes several times faster. LPC on 24-bit audio takes 64-bit arithmetic, which Xtensa builds from 32-bit halves, hence its lower speed.
+
 ### Memory Usage
 
 | Allocation | Size | Notes |
@@ -331,6 +348,12 @@ Unit tests for the bit writer and the encoder's configuration and argument handl
 cd tests/encoder
 cmake -B build && cmake --build build
 ctest --test-dir build
+```
+
+```bash
+# ESP32 benchmark
+cd examples/encode_benchmark
+pio run -e esp32s3 -t upload -t monitor
 ```
 
 ## Advanced Features

@@ -327,6 +327,8 @@ jobs:
         include:
           - example: decode_benchmark
             environments: esp32,esp32s3
+          - example: encode_benchmark
+            environments: esp32s3,esp32p4
           - example: test_lpc_asm
             environments: esp32,esp32s3
     steps:

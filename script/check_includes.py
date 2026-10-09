@@ -79,7 +79,9 @@ IGNORE_HEADERS = ["sdkconfig.h", "stdlib.h", "_abort.h", "_endian.h"]
 # compile-db entry (headers, ESP-only sources, tests the build didn't compile)
 # get flags interpolated from the nearest entry, which may lack these roots.
 # Duplicates of roots already in an entry's flags are harmless.
-EXTRA_INCLUDE_DIRS = ["src", "include"]
+# encode_benchmark reuses decode_benchmark's test_audio_flac.h, as its
+# main/CMakeLists.txt does.
+EXTRA_INCLUDE_DIRS = ["src", "include", "examples/decode_benchmark/main"]
 
 # Extra compiler args appended to every invocation, e.g. ["-xc++", "-std=gnu++14"]
 # to force C++ when the compile db mixes C and C++ commands and flag
