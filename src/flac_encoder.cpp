@@ -1172,6 +1172,8 @@ FLAC_NOINLINE size_t close_frame(BitWriterLocal& bw, const uint8_t* frame_start)
 constexpr size_t FLACEncoder::HEADER_BYTES;
 constexpr uint32_t FLACEncoder::MIN_BLOCK_SIZE;
 constexpr uint32_t FLACEncoder::MAX_BLOCK_SIZE;
+constexpr uint8_t FLACEncoder::MAX_RICE_PARTITION_ORDER;
+constexpr bool FLACEncoder::RICE_PARTITIONS_AVAILABLE;
 #endif
 
 // ============================================================================
