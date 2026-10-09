@@ -137,7 +137,7 @@ if (encoder.write_header(out.data(), out.size(), bytes_written) == FLAC_ENCODER_
 }
 ```
 
-The stream is decodable exactly as emitted. The header written before `finish()` leaves STREAMINFO's total sample count and minimum/maximum frame size as "unknown" (spec-legal); rewriting it after `finish()` fills them in. The MD5 signature is always left unset; a caller can compute it and write it into the finished header's last 16 bytes.
+The stream is decodable exactly as emitted. The header written before `finish()` leaves STREAMINFO's total sample count and minimum/maximum frame size as "unknown" (spec-legal); rewriting it after `finish()` fills them in. The MD5 signature is always left unset; `host_examples/wav_to_flac` shows how a caller computes it and writes it into the finished header's last 16 bytes.
 
 ### PlatformIO
 
@@ -162,6 +162,10 @@ cd host_examples/flac_to_wav
 cmake -B build && cmake --build build
 ./build/flac_to_wav input.flac output.wav       # Native FLAC
 ./build/flac_to_wav input.oga output.wav        # Ogg FLAC
+
+cd ../wav_to_flac
+cmake -B build && cmake --build build
+./build/wav_to_flac input.wav output.flac       # Encode
 ```
 
 ## API Reference
@@ -306,6 +310,14 @@ cd examples/decode_benchmark
 pio run -e esp32s3 -t upload -t monitor
 ```
 
+The encoder is validated with a round-trip suite: synthetic and real-audio WAV sources are encoded, decoded back with the decoder above (and, when available, `ffmpeg`/`flac`), and checked for bit-exact PCM.
+
+```bash
+cd host_examples/wav_to_flac
+cmake -B build && cmake --build build
+python3 test_flac_encoder.py
+```
+
 Unit tests for the bit writer and the encoder's configuration and argument handling live in `tests/encoder`:
 
 ```bash
@@ -368,7 +380,7 @@ Override `FLAC_MALLOC` and `FLAC_FREE` at compile time (`-DFLAC_MALLOC=my_custom
 - **Encoder tops out at 24-bit**: Any depth outside 4-24 is `FLAC_ENCODER_ERROR_BAD_CONFIG`; 32-bit input would need a 64-bit residual path
 - **Encoder uses a fixed block size**: Every frame but the last is `block_size` samples; there is no variable-blocksize mode
 - **Streamable subset is up to the caller**: Block sizes above 16384, or above 4608 at 48 kHz or below, bit depths other than 8/12/16/20/24, and sample rates no frame header code can carry (above 65535 Hz, other than multiples of 10 up to 655350 Hz and whole kHz up to 255 kHz; these are read from STREAMINFO) fall outside RFC 9639's streamable subset (§7), which a strict subset-only decoder may refuse. The defaults are within it
-- **Encoder writes no MD5 signature**: STREAMINFO's MD5 is left zeroed ("unknown"). The caller can hash the input and patch the digest into the finished header
+- **Encoder writes no MD5 signature**: STREAMINFO's MD5 is left zeroed ("unknown"). The caller can hash the input and patch the digest into the finished header, as `wav_to_flac` does
 - **Encoder output is native FLAC only**: No Ogg FLAC container, seektables, or Vorbis comments
 - **Encoder has no Xtensa assembly**: C implementation on all targets
 

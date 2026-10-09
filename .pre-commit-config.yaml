@@ -14,7 +14,7 @@ repos:
       - id: clang-format
         types_or: [c, c++]
         # Only format our own code, not submodules or build directories
-        files: ^(src/|include/|examples/.*/main/|tests/|host_examples/flac_to_wav/)
+        files: ^(src/|include/|examples/.*/main/|tests/|host_examples/common/|host_examples/flac_to_wav/|host_examples/wav_to_flac/)
         exclude: (build[^/]*/|\.pio/)
 
   - repo: https://github.com/igorshubovych/markdownlint-cli

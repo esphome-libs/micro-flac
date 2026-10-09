@@ -44,6 +44,7 @@ cppcheck \
     --suppress='functionStatic:include/micro_flac/*' \
     -i build \
     -i host_examples/flac_to_wav/build \
+    -i host_examples/wav_to_flac/build \
     -i tests/regression/build \
     -i tests/encoder/build \
     -i tests/fuzz/build-libfuzzer \

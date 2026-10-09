@@ -166,8 +166,8 @@ struct FLACEncoderOptions {
  * @note Without step 5 the stream is still valid: STREAMINFO's total sample
  *       count and frame sizes stay "unknown" (RFC 9639 SS8.2). The MD5
  *       signature is always left unset. A caller that wants one hashes its
- *       input and writes the digest into the header's last 16 bytes. At
- *       depths other than 8, 16 and 24,
+ *       input and writes the digest into the header's last 16 bytes, as
+ *       host_examples/wav_to_flac does. At depths other than 8, 16 and 24,
  *       each sample must first be right-justified and sign-extended in its
  *       bytes before hashing.
  */
