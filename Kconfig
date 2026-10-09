@@ -64,6 +64,23 @@ menu "microFLAC"
             heap allocation. Disable this if you only need native FLAC
             decoding.
 
+    config MICRO_FLAC_ENCODER_ENABLE_LPC
+        bool "Enable encoder LPC (linear prediction)"
+        default y
+        help
+            Compile in FLACEncoder's opt-in linear prediction
+            (FLACEncoderOptions::lpc, max_lpc_order), which
+            makes 16-bit music about 7-9% smaller at roughly 2.4x the encode
+            time. LPC is off at run time by default either way. Streams of
+            17-24 bits take 64-bit arithmetic, which Xtensa builds from 32-bit
+            halves: on the ESP32-S3, 24-bit stereo with LPC order 8 encodes at
+            about 4.1x real time (15.9x without LPC).
+
+            When disabled, the LPC code is left out (about 19 KB of flash on
+            the ESP32-S3) and the LPC options are validated but ignored: the
+            encoder uses fixed predictors only, with output identical to a
+            build that has LPC but leaves it off.
+
     config MICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS
         bool "Enable encoder Rice partitioning"
         default y

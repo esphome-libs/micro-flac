@@ -203,12 +203,13 @@ jobs:
   # Every compile-time switch combination round-trips: a build without a
   # feature must still encode everything else correctly.
   encoder-test:
-    name: "Test: FLAC encode (partitions=${{ matrix.partitions }})"
+    name: "Test: FLAC encode (LPC=${{ matrix.lpc }}, partitions=${{ matrix.partitions }})"
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        lpc: ['ON', 'OFF']
         partitions: ['ON', 'OFF']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -243,6 +244,7 @@ jobs:
         run: |
           for example in flac_to_wav wav_to_flac; do
             cmake -B host_examples/$example/build -DENABLE_SANITIZERS=ON -DENABLE_WERROR=ON \
+              -DMICRO_FLAC_ENCODER_ENABLE_LPC=${{ matrix.lpc }} \
               -DMICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS=${{ matrix.partitions }} \
               host_examples/$example
             cmake --build host_examples/$example/build -j"$(nproc)"
@@ -254,9 +256,13 @@ jobs:
   # The encoder's compile-time switches, each with its unit tests (which adapt to
   # what a build leaves out).
   encoder-switches:
-    name: "Encoder switches"
+    name: "Encoder switches: LPC=${{ matrix.lpc }}"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        lpc: ['ON', 'OFF']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -271,6 +277,7 @@ jobs:
             echo "::group::RICE_PARTITIONS=$partitions"
             dir="build-$partitions"
             cmake -B "$dir" -DENABLE_WERROR=ON \
+              -DMICRO_FLAC_ENCODER_ENABLE_LPC=${{ matrix.lpc }} \
               -DMICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS="$partitions" \
               tests/encoder
             cmake --build "$dir" -j"$(nproc)"

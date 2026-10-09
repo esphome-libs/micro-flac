@@ -819,6 +819,11 @@ def main():
         help="Skip the bit-depth (8/24-bit) and channel-count (3-8) matrix",
     )
     parser.add_argument(
+        "--skip-lpc",
+        action="store_true",
+        help="Skip the LPC (--lpc / --lpc-order) pass",
+    )
+    parser.add_argument(
         "--skip-partitions",
         action="store_true",
         help="Skip the Rice partitioning (--partition-order) pass",
@@ -915,13 +920,28 @@ def main():
     # block-size table entry; 1000 is not (16-bit escape code), and leaves a
     # 50-sample final frame from the half-second sources.
     depth_channel_block_sizes = [4096, 1000]
+    # The LPC pass: the default order at a spread of block sizes (the
+    # coefficient precision follows the block size, coarsest at 16), the
+    # lowest and highest orders at the default block size, the final-frame
+    # edge cases at the highest order
+    # (frames shorter than the predictor), and the depth/channel matrix
+    # (8-bit, 24-bit and 3-8 channel LPC).
+    lpc_matrix = [
+        (["--lpc"], bs) for bs in (16, 192, 1000, 4096)
+    ] + [(["--lpc-order", "1"], 4096), (["--lpc-order", "12"], 4096)]
+    if args.skip_lpc:
+        skip_notes.append("--skip-lpc passed -- LPC pass skipped")
+        lpc_matrix = []
     # The Rice partitioning pass: the highest order at block sizes that allow
     # different partition counts (16: at most 2 with an order-4 predictor;
-    # 1000 = 8 * 125: at most 8; 1152: at most 64); then the final-frame edge
-    # cases (odd and short frames, which cannot be split) and the depth/channel
-    # matrix.
+    # 1000 = 8 * 125: at most 8; 1152: at most 64), with FIXED and LPC; then
+    # the final-frame edge cases (odd and short frames, which cannot be split)
+    # and the depth/channel matrix (8-bit stereo through LPC, 24-bit and 3-8
+    # channel FIXED).
     partition_matrix = [
         (["--partition-order", "6"], bs) for bs in (16, 1000, 1152, 4096)
+    ] + [
+        (["--lpc", "--partition-order", "6"], bs) for bs in (192, 4096)
     ]
     if args.skip_partitions:
         skip_notes.append("--skip-partitions passed -- Rice partitioning pass skipped")
@@ -930,6 +950,8 @@ def main():
         len(all_matrix_sources) * len(block_sizes)
         + len(short_tail_sources)
         + len(depth_channel_sources) * len(depth_channel_block_sizes)
+        + len(all_matrix_sources) * len(lpc_matrix)
+        + (len(short_tail_sources) + len(depth_channel_sources) if lpc_matrix else 0)
         + len(all_matrix_sources) * len(partition_matrix)
         + (len(short_tail_sources) + len(depth_channel_sources) if partition_matrix else 0)
     )
@@ -980,6 +1002,41 @@ def main():
                 )
 
     # ------------------------------------------------------------------
+    # LPC (FLACEncoderOptions::lpc)
+    # ------------------------------------------------------------------
+    if lpc_matrix:
+        print()
+        print("=" * 40)
+        print("LPC")
+        print("=" * 40)
+        for source in all_matrix_sources:
+            print(f"\n  {source.name} ({source.channels}ch)...")
+            for lpc_args, bs in lpc_matrix:
+                case_idx += 1
+                tag = "lpc" + "".join(a.strip("-") for a in lpc_args[1:]) + f"_bs{bs}"
+                result = run_case(source, lpc_args + ["--block-size", str(bs)], tag, block_size=bs)
+                all_results.append(result)
+                print(
+                    f"    [{case_idx}/{total_cases}] {' '.join(lpc_args)} block-size={bs}..."
+                    f" {result.message.split(' - ')[0]}"
+                )
+        for source in short_tail_sources:
+            case_idx += 1
+            result = run_case(
+                source, ["--lpc-order", "12", "--block-size", "4096"], "lpc12_shorttail", block_size=4096
+            )
+            all_results.append(result)
+            print(f"  [{case_idx}/{total_cases}] {source.name} --lpc-order 12... {result.message.split(' - ')[0]}")
+        for source in depth_channel_sources:
+            case_idx += 1
+            result = run_case(source, ["--lpc", "--block-size", "4096"], "lpc_bs4096", block_size=4096)
+            all_results.append(result)
+            print(
+                f"  [{case_idx}/{total_cases}] {source.name} ({source.channels}ch, {source.bits}-bit)"
+                f" --lpc... {result.message.split(' - ')[0]}"
+            )
+
+    # ------------------------------------------------------------------
     # Rice partitioning (FLACEncoderOptions::max_rice_partition_order)
     # ------------------------------------------------------------------
     if partition_matrix:
@@ -998,23 +1055,23 @@ def main():
                     f"    [{case_idx}/{total_cases}] {' '.join(part_args)} block-size={bs}..."
                     f" {result.message.split(' - ')[0]}"
                 )
-        tail_args = ["--partition-order", "6", "--block-size", "4096"]
+        tail_args = ["--lpc-order", "12", "--partition-order", "6", "--block-size", "4096"]
         for source in short_tail_sources:
             case_idx += 1
             result = run_case(source, tail_args, "part_shorttail", block_size=4096)
             all_results.append(result)
             print(
-                f"  [{case_idx}/{total_cases}] {source.name} --partition-order 6..."
+                f"  [{case_idx}/{total_cases}] {source.name} --lpc-order 12 --partition-order 6..."
                 f" {result.message.split(' - ')[0]}"
             )
-        depth_args = ["--partition-order", "6", "--block-size", "4096"]
+        depth_args = ["--lpc", "--partition-order", "6", "--block-size", "4096"]
         for source in depth_channel_sources:
             case_idx += 1
             result = run_case(source, depth_args, "part_bs4096", block_size=4096)
             all_results.append(result)
             print(
                 f"  [{case_idx}/{total_cases}] {source.name} ({source.channels}ch, {source.bits}-bit)"
-                f" --partition-order 6... {result.message.split(' - ')[0]}"
+                f" --lpc --partition-order 6... {result.message.split(' - ')[0]}"
             )
 
     # ------------------------------------------------------------------

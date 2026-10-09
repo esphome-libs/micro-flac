@@ -22,11 +22,11 @@ A FLAC (Free Lossless Audio Codec) decoder and encoder optimized for ESP32 embed
 ### Encoding
 
 - **4-24 bit PCM input, 1-8 channels**: Packed interleaved bytes in exactly the layout the decoder outputs (`PcmFormat`)
-- **Fixed predictors**: Orders 0-4, chosen per subframe. All integer arithmetic, so output is identical on every platform
+- **Fixed predictors, plus opt-in LPC**: Fixed predictors (orders 0-4) always; linear prediction up to order 12 on request, typically 7-9% smaller on music. All integer arithmetic, so output is identical on every platform
 - **Opt-in Rice partitioning**: Each subframe's residuals split into up to 64 partitions with their own Rice parameters, about 1% smaller at large blocks
 - **Stereo decorrelation**: Each frame takes the cheapest of the four channel assignments
 - **Wasted-bits detection**: 16-bit audio in a 24-bit stream codes nearly as small as a 16-bit stream
-- **No buffering, no allocation**: `encode()` reads one block straight from the caller's buffer; all working memory is the ~2.1 KB object plus up to ~2.3 KB of task stack
+- **No buffering, no allocation**: `encode()` reads one block straight from the caller's buffer; all working memory is the ~2.1 KB object plus up to ~3.4 KB of task stack
 - **Finished stream header**: After `finish()`, a same-size header carrying the total sample count and frame-size range can overwrite the first
 
 ## Quick Start
@@ -97,7 +97,7 @@ delete[] output;
 
 using namespace micro_flac;
 
-// 44.1kHz 16-bit stereo input; FLACEncoderOptions (block size, Rice
+// 44.1kHz 16-bit stereo input; FLACEncoderOptions (block size, LPC, Rice
 // partitioning, wasted bits) can be passed as a second argument.
 FLACEncoder encoder(PcmFormat{44100, 2, 16});
 
@@ -220,6 +220,8 @@ Available after `decode()` returns `FLAC_DECODER_HEADER_READY` via `decoder.get_
 - **`PcmFormat`** (`micro_flac/pcm_format.h`) describes the input. Construct it as `PcmFormat{sample_rate, num_channels, bits_per_sample}` (1-1048575 Hz, 1-8 channels, 4-24 bits) and read it back through `sample_rate()`, `num_channels()`, `bits_per_sample()`, `bytes_per_sample()`, `bytes_per_frame()` and `is_valid()`, as in the other micro-* libraries. Samples are interleaved, little-endian, signed and `ceil(bits_per_sample() / 8)` bytes wide, with other depths left-justified (a 12-bit sample fills the top 12 bits of its 2 bytes). This is exactly what the decoder's `uint8_t*` `decode()` produces. 2-byte samples must be 2-byte aligned.
 - **`FLACEncoderOptions`** controls compression:
   - `block_size` (16-65535, default 4096).
+  - `lpc` (default off): also try linear prediction on each subframe, keeping it where it is estimated smaller. Typically 7-9% smaller on 16-bit music. Streams of 17-24 bits use 64-bit arithmetic, much slower on an ESP32.
+  - `max_lpc_order` (1-12, default 8): the highest LPC order tried. Orders 4, 8 and 12 come out about 6.8%, 8.6% and 9% smaller than the fixed predictors alone.
   - `max_rice_partition_order` (0-6, default 0): split each subframe's residuals into up to 2^order partitions with their own Rice parameters. About 1% smaller at block size 4096, 0.3% at 1152.
   - `wasted_bits` (default on): code a subframe whose samples all end in the same k zero bits k bits shallower (RFC 9639 §9.2.2), as with 16-bit audio in a 24-bit stream.
 
@@ -254,11 +256,11 @@ Every call returns `FLACEncoderResult`: non-negative values are success/informat
 
 ### Output Bound Guarantee
 
-`get_max_output_bytes()` is a hard upper bound on what any call can write. A call with a frame to write checks the output size first and returns `FLAC_ENCODER_ERROR_OUTPUT_BUFFER_TOO_SMALL` without touching `output` if it is smaller. The bound holds for every input because a FIXED subframe is written only when it is provably smaller than VERBATIM.
+`get_max_output_bytes()` is a hard upper bound on what any call can write. A call with a frame to write checks the output size first and returns `FLAC_ENCODER_ERROR_OUTPUT_BUFFER_TOO_SMALL` without touching `output` if it is smaller. The bound holds for every input because a FIXED or LPC subframe is written only when it is provably smaller than VERBATIM.
 
 ## Configuration
 
-Configure via ESP-IDF menuconfig (`Component config → microFLAC`) or compile flags. Host CMake builds take the same feature switches as options (`-DMICRO_FLAC_ENABLE_OGG=OFF`, `-DMICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS=OFF`).
+Configure via ESP-IDF menuconfig (`Component config → microFLAC`) or compile flags. Host CMake builds take the same feature switches as options (`-DMICRO_FLAC_ENABLE_OGG=OFF`, `-DMICRO_FLAC_ENCODER_ENABLE_LPC=OFF`, `-DMICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS=OFF`).
 
 | Option | Default | Kconfig / Compile Flag | Notes |
 | ------ | ------- | ---------------------- | ----- |
@@ -266,6 +268,7 @@ Configure via ESP-IDF menuconfig (`Component config → microFLAC`) or compile f
 | CRC checking | Enabled | Runtime: `set_crc_check_enabled(bool)` | CRC-8 (header) and CRC-16 (data) |
 | Xtensa assembly | Enabled (ESP32/S3) | `CONFIG_MICRO_FLAC_ENABLE_XTENSA_ASM` | MULL/MULSH and hardware loops for LPC |
 | Ogg FLAC support | Enabled | `CONFIG_MICRO_FLAC_ENABLE_OGG` / `-DMICRO_FLAC_DISABLE_OGG` | Disabling saves ~3-5 KB flash |
+| Encoder LPC | Enabled | `CONFIG_MICRO_FLAC_ENCODER_ENABLE_LPC` / `-DMICRO_FLAC_ENCODER_DISABLE_LPC` | Disabling saves ~19 KB flash (ESP32-S3); the LPC options are then ignored. `FLACEncoder::LPC_AVAILABLE` reports it |
 | Encoder Rice partitioning | Enabled | `CONFIG_MICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS` / `-DMICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS` | Disabling saves ~7 KB flash (ESP32-S3); `max_rice_partition_order` is then ignored. `FLACEncoder::RICE_PARTITIONS_AVAILABLE` reports it |
 
 ## Performance
@@ -289,7 +292,7 @@ ESP32-S3 and ESP32-P4 numbers are measured with the working buffer in PSRAM (the
 | Block samples buffer | `max_block_size × channels × 4` | Typically 16-64KB |
 | Metadata blocks | Variable | Configurable per type |
 | Output buffer | `max_block_size × channels × bytes_per_sample` | Allocated by user |
-| Encoder object | ~2.1 KB | Stack or heap. `encode()` itself needs up to about 1.6 KB of task stack, or 2.3 KB with partitioning |
+| Encoder object | ~2.1 KB | Stack or heap. `encode()` itself needs up to about 1.6 KB of task stack, 2.3 KB with partitioning, or 3.4 KB with LPC |
 | Encoder output buffer | `get_max_output_bytes()` | Allocated by user; fits one worst-case frame |
 | Encoder input | One block (`get_input_block_bytes()`) | The caller's buffer, unpacked a chunk at a time |
 

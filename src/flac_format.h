@@ -152,6 +152,16 @@ static constexpr const int16_t* FIXED_COEFFICIENTS[] = {nullptr, FIXED_COEFFICIE
                                                         FIXED_COEFFICIENTS_2, FIXED_COEFFICIENTS_3,
                                                         FIXED_COEFFICIENTS_4};
 
+/// @brief LPC subframe field widths (Section 9.2.6): precision minus one, then shift
+static constexpr uint8_t LPC_PRECISION_BITS = 4;
+static constexpr uint8_t LPC_SHIFT_BITS = 5;
+
+/// @brief Largest LPC coefficient precision: its field's all-ones value is reserved
+static constexpr uint32_t LPC_PRECISION_MAX = 15;
+
+/// @brief Largest LPC shift: the field is signed and negative shifts are forbidden
+static constexpr int32_t LPC_SHIFT_MAX = 15;
+
 /// @brief Bits in a residual's coding method field (Section 9.2.7)
 static constexpr uint8_t RESIDUAL_CODING_METHOD_BITS = 2;
 

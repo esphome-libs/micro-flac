@@ -52,7 +52,11 @@ function(flac_configure_esp_idf COMPONENT_LIB COMPONENT_DIR)
     endif()
 
     # Compile encoder features out if their Kconfig options are off. PUBLIC:
-    # flac_encoder.h reads them (FLACEncoder::RICE_PARTITIONS_AVAILABLE).
+    # flac_encoder.h reads them (FLACEncoder::LPC_AVAILABLE,
+    # MAX_LPC_BITS_PER_SAMPLE and RICE_PARTITIONS_AVAILABLE).
+    if(NOT CONFIG_MICRO_FLAC_ENCODER_ENABLE_LPC)
+        target_compile_definitions(${COMPONENT_LIB} PUBLIC MICRO_FLAC_ENCODER_DISABLE_LPC)
+    endif()
     if(NOT CONFIG_MICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS)
         target_compile_definitions(${COMPONENT_LIB} PUBLIC MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS)
     endif()
