@@ -94,7 +94,7 @@ examples/*/sdkconfig.*
 host_examples/*/build/
 
 # Benchmark/test data
-test/
+/test/
 *.tar.gz
 *.tar
 *.zip
