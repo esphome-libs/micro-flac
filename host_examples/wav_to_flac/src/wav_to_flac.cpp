@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "file_io.h"      // host_examples/common/include, shared with flac_to_wav
 #include "flac_format.h"  // Channel assignment codes, MAGIC_BYTES, STREAMINFO_SIZE
 #include "md5.h"          // host_examples/common/include, shared with flac_to_wav
 #include "micro_flac/flac_encoder.h"
@@ -296,6 +297,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     FILE* wav_file = std::fopen(args.input_file, "rb");
     if (!wav_file) {
         std::fprintf(stderr, "Error: could not open input file: %s\n", args.input_file);
+        return 1;
+    }
+    if (is_same_file(args.output_file, args.input_file)) {
+        std::fprintf(stderr, "Error: the output file is the input file: %s\n", args.output_file);
+        std::fclose(wav_file);
         return 1;
     }
 

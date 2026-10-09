@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "file_io.h"
 #include "md5.h"
 #include "micro_flac/flac_decoder.h"
 
@@ -342,6 +343,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     FILE* flac_file = std::fopen(input_file, "rb");
     if (!flac_file) {
         std::fprintf(stderr, "Error: Could not open input file: %s\n", input_file);
+        return 1;
+    }
+    if (is_same_file(output_file, input_file)) {
+        std::fprintf(stderr, "Error: The output file is the input file: %s\n", output_file);
+        std::fclose(flac_file);
         return 1;
     }
 
