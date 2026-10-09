@@ -51,6 +51,7 @@ cppcheck \
     -i tests/fuzz/build-standalone \
     -i tests/fuzz/build-cov \
     -i examples/decode_benchmark/.pio \
+    -i examples/encode_benchmark/.pio \
     -i examples/test_lpc_asm/.pio \
     -I include \
     -I src \

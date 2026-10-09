@@ -36,6 +36,12 @@ pio run -e esp32s3                          # Build only
 pio run -e esp32s3 -t upload -t monitor     # Build, flash, and monitor
 ```
 
+```bash
+cd examples/encode_benchmark
+pio run -e esp32s3                          # Build only
+pio run -e esp32s3 -t upload -t monitor     # Build, flash, and monitor
+```
+
 ### Run Tests
 
 ```bash
@@ -126,6 +132,13 @@ python3 test_flac_encoder.py --skip-lpc --skip-partitions  # Skip the LPC and Ri
    # (options for a feature compiled out must be ignored)
    cmake -DMICRO_FLAC_ENCODER_ENABLE_LPC=OFF -DMICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS=OFF -B build-min
    cmake --build build-min && ./build-min/test_encoder_config
+   ```
+
+4. **ESP32 encoder benchmark**:
+
+   ```bash
+   cd examples/encode_benchmark
+   pio run -e esp32s3 -t upload -t monitor
    ```
 
 ### Debugging decode issues
