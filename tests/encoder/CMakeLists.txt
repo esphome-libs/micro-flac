@@ -43,7 +43,8 @@ target_compile_options(test_bit_writer PRIVATE -O2 ${TEST_WARNINGS})
 # -fno-access-control (GCC and Clang) turns off access checking for this
 # translation unit only, so the test can read and set FLACEncoder's private
 # members without the public header carrying test-only accessors. The
-# library itself is built without it.
+# library itself is built without it. The stereo search's joint
+# autocorrelation is checked through the internal lpc_analysis.h.
 add_executable(test_encoder_config test_encoder_config.cpp)
 target_link_libraries(test_encoder_config PRIVATE micro_flac)
 target_include_directories(test_encoder_config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)

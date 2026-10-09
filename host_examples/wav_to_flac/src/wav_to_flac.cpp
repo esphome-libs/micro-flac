@@ -196,6 +196,7 @@ bool read_wav_header(FILE* f, WavInfo& info) {
 struct Args {
     uint32_t block_size = DEFAULT_BLOCK_SIZE;
     bool lpc = false;
+    bool lpc_stereo_search = false;
     uint8_t max_lpc_order = FLACEncoderOptions{}.max_lpc_order;
     uint8_t max_rice_partition_order = 0;
     bool wasted_bits = FLACEncoderOptions{}.wasted_bits;
@@ -226,6 +227,10 @@ bool parse_args(int argc, const char* const argv[], Args& args) {
             arg_idx += 2;
         } else if (std::strcmp(arg, "--lpc") == 0) {
             args.lpc = true;
+            arg_idx += 1;
+        } else if (std::strcmp(arg, "--lpc-stereo-search") == 0) {
+            args.lpc = true;  // Implies --lpc
+            args.lpc_stereo_search = true;
             arg_idx += 1;
         } else if (std::strcmp(arg, "--lpc-order") == 0) {
             if (arg_idx + 1 >= argc) {
@@ -269,7 +274,7 @@ bool parse_args(int argc, const char* const argv[], Args& args) {
 
     if (argc - arg_idx != 2) {
         std::fprintf(stderr,
-                     "Usage: %s [--block-size N] [--lpc] [--lpc-order N] "
+                     "Usage: %s [--block-size N] [--lpc] [--lpc-order N] [--lpc-stereo-search] "
                      "[--partition-order N] [--no-wasted-bits] <input.wav> <output.flac>\n",
                      argv[0]);
         return false;
@@ -322,6 +327,7 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     options.block_size = args.block_size;
     options.lpc = args.lpc;
     options.max_lpc_order = args.max_lpc_order;
+    options.lpc_stereo_search = args.lpc_stereo_search;
     options.max_rice_partition_order = args.max_rice_partition_order;
     options.wasted_bits = args.wasted_bits;
 

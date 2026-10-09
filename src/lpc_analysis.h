@@ -97,6 +97,38 @@ struct LpcPredictor {
     bool wide;                            // Residuals need the wide path's 64-bit dot product
 };
 
+/// The autocorrelations of all four stereo candidates from one walk over left
+/// and right. Mid's and side's follow exactly from left's, right's and their
+/// windowed sum's: (a + b)(c + d) + (a - b)(c - d) = 2(ac + bd).
+struct LpcStereoAutocorrelation {
+    LpcAutocorrelation left;
+    LpcAutocorrelation right;
+    int64_t sum_lr[LPC_MAX_ORDER + 1];  // Of the windowed left + right
+    uint32_t bps;                       // The stream's depth
+};
+
+/// Begin the joint autocorrelation of an n-sample stereo pair of depth bps.
+/// `wide` takes the wide path, which needs n <= LPC_STEREO_WIDE_MAX_SAMPLES.
+void lpc_stereo_autocorrelation_begin(LpcStereoAutocorrelation& st, uint32_t n, uint32_t lags,
+                                      uint32_t bps, bool wide);
+
+/// Feed the next m samples of each channel. The work buffers hold
+/// LPC_WORK_SAMPLES each; a call of at most LPC_KERNEL_SAMPLES may pass
+/// work + LPC_MAX_ORDER as the samples, to be windowed in place.
+void lpc_stereo_autocorrelation_update(LpcStereoAutocorrelation& st, const int32_t* left,
+                                       const int32_t* right, uint32_t m, int32_t* work_left,
+                                       int32_t* work_right);
+
+/// Set `mid` and `side` to the finished autocorrelations of (l + r) / 2 and
+/// l - r, scaled as their own would be. They may alias st.left and st.right
+/// once those are designed.
+void lpc_stereo_autocorrelation_finish(const LpcStereoAutocorrelation& st, LpcAutocorrelation& mid,
+                                       LpcAutocorrelation& side);
+
+/// Longest pair the joint autocorrelation takes on the wide path, where the
+/// windowed sum's products would otherwise overflow int64
+constexpr uint32_t LPC_STEREO_WIDE_MAX_SAMPLES = 32767;
+
 /// Design the predictor for a finished autocorrelation at subframe depth bps,
 /// aiming for `precision` coefficient bits (lowered on the narrow path to
 /// keep residuals in 32 bits). Returns false when no usable predictor exists.

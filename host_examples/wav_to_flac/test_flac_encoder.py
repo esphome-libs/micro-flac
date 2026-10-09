@@ -922,27 +922,30 @@ def main():
     depth_channel_block_sizes = [4096, 1000]
     # The LPC pass: the default order at a spread of block sizes (the
     # coefficient precision follows the block size, coarsest at 16), the
-    # lowest and highest orders at the default block size, the final-frame
-    # edge cases at the highest order
+    # lowest and highest orders at the default block size, the stereo search
+    # at two block sizes, the final-frame edge cases at the highest order
     # (frames shorter than the predictor), and the depth/channel matrix
     # (8-bit, 24-bit and 3-8 channel LPC).
     lpc_matrix = [
         (["--lpc"], bs) for bs in (16, 192, 1000, 4096)
-    ] + [(["--lpc-order", "1"], 4096), (["--lpc-order", "12"], 4096)]
+    ] + [(["--lpc-order", "1"], 4096), (["--lpc-order", "12"], 4096)] + [
+        (["--lpc-stereo-search"], bs) for bs in (192, 4096)
+    ]
     if args.skip_lpc:
         skip_notes.append("--skip-lpc passed -- LPC pass skipped")
         lpc_matrix = []
     # The Rice partitioning pass: the highest order at block sizes that allow
     # different partition counts (16: at most 2 with an order-4 predictor;
-    # 1000 = 8 * 125: at most 8; 1152: at most 64), with FIXED and LPC; then
-    # the final-frame edge cases (odd and short frames, which cannot be split)
-    # and the depth/channel matrix (8-bit stereo through LPC, 24-bit and 3-8
-    # channel FIXED).
+    # 1000 = 8 * 125: at most 8; 1152: at most 64), with FIXED, LPC and the
+    # stereo search at the highest LPC order; then the final-frame edge cases
+    # (odd and short frames, which cannot be split) and the depth/channel
+    # matrix (8-bit stereo through the stereo search, 24-bit and 3-8 channel
+    # FIXED).
     partition_matrix = [
         (["--partition-order", "6"], bs) for bs in (16, 1000, 1152, 4096)
     ] + [
         (["--lpc", "--partition-order", "6"], bs) for bs in (192, 4096)
-    ]
+    ] + [(["--lpc-stereo-search", "--lpc-order", "12", "--partition-order", "6"], 4096)]
     if args.skip_partitions:
         skip_notes.append("--skip-partitions passed -- Rice partitioning pass skipped")
         partition_matrix = []
@@ -1064,14 +1067,14 @@ def main():
                 f"  [{case_idx}/{total_cases}] {source.name} --lpc-order 12 --partition-order 6..."
                 f" {result.message.split(' - ')[0]}"
             )
-        depth_args = ["--lpc", "--partition-order", "6", "--block-size", "4096"]
+        depth_args = ["--lpc-stereo-search", "--partition-order", "6", "--block-size", "4096"]
         for source in depth_channel_sources:
             case_idx += 1
             result = run_case(source, depth_args, "part_bs4096", block_size=4096)
             all_results.append(result)
             print(
                 f"  [{case_idx}/{total_cases}] {source.name} ({source.channels}ch, {source.bits}-bit)"
-                f" --lpc --partition-order 6... {result.message.split(' - ')[0]}"
+                f" --lpc-stereo-search --partition-order 6... {result.message.split(' - ')[0]}"
             )
 
     # ------------------------------------------------------------------

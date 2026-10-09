@@ -44,6 +44,10 @@
 #include "micro_flac/flac_encoder.h"
 #include "micro_flac/pcm_format.h"
 
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+#include "lpc_analysis.h"  // Internal: the stereo search's joint autocorrelation
+#endif
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -177,6 +181,11 @@ void check_config_validation() {
         check("lpc with max_lpc_order 12 (max)", first_use(make_format(2, 16), lpc),
               FLAC_ENCODER_SUCCESS);
         check("lpc on a 24-bit stream", first_use(make_format(2, 24), lpc), FLAC_ENCODER_SUCCESS);
+        lpc.lpc_stereo_search = true;
+        check("lpc_stereo_search", first_use(make_format(2, 16), lpc), FLAC_ENCODER_SUCCESS);
+        check("lpc_stereo_search on mono (accepted, ignored)", first_use(make_format(1, 16), lpc),
+              FLAC_ENCODER_SUCCESS);
+        lpc.lpc_stereo_search = false;
         lpc.lpc = false;
         lpc.max_lpc_order = 0;
         check("max_lpc_order 0 with lpc off (ignored)", first_use(make_format(2, 16), lpc),
@@ -201,13 +210,15 @@ void check_config_validation() {
         FLACEncoderOptions options = make_options(1152);
         options.lpc = true;
         options.max_lpc_order = 5;
+        options.lpc_stereo_search = true;
         options.max_rice_partition_order = 3;
         options.wasted_bits = false;
         const FLACEncoder e(make_format(2, 16), options);
         const FLACEncoderOptions& got = e.get_options();
         check_true("get_options() returns the options passed",
                    got.block_size == 1152 && got.lpc && got.max_lpc_order == 5 &&
-                       got.max_rice_partition_order == 3 && !got.wasted_bits);
+                       got.lpc_stereo_search && got.max_rice_partition_order == 3 &&
+                       !got.wasted_bits);
     }
 
     std::printf("\nUnsupported configurations fail every call until reconfigured:\n");
@@ -870,7 +881,7 @@ void check_stream_boundaries() {
 bool matches_fresh(const FLACEncoder& e, const PcmFormat& format,
                    const FLACEncoderOptions& options) {
     const FLACEncoder fresh(format, options);
-    const bool same =
+    bool same =
         e.config_result_ == fresh.config_result_ &&
         e.max_output_bytes_ == fresh.max_output_bytes_ &&
         e.input_block_bytes_ == fresh.input_block_bytes_ &&
@@ -889,8 +900,12 @@ bool matches_fresh(const FLACEncoder& e, const PcmFormat& format,
         e.get_pcm_format().bits_per_sample() == format.bits_per_sample() &&
         e.get_options().block_size == options.block_size && e.get_options().lpc == options.lpc &&
         e.get_options().max_lpc_order == options.max_lpc_order &&
+        e.get_options().lpc_stereo_search == options.lpc_stereo_search &&
         e.get_options().max_rice_partition_order == options.max_rice_partition_order &&
         e.get_options().wasted_bits == options.wasted_bits;
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+    same = same && e.lpc_stereo_search_ == fresh.lpc_stereo_search_;
+#endif
     return same;
 }
 
@@ -910,12 +925,13 @@ void check_reconfigure() {
     std::printf("\nreset(format, options) leaves the encoder as the constructor would:\n");
 
     // Rich: a sample rate carried in two extra header bytes (code 13), LPC
-    // and partitioning, so every derived field is set
+    // with the stereo search, and partitioning, so every derived field is set
     // (where the build compiles its feature in)
     const PcmFormat rich = make_format(2, 16, 22051);
     FLACEncoderOptions rich_options = make_options(1152);
     rich_options.lpc = true;
     rich_options.max_lpc_order = 8;
+    rich_options.lpc_stereo_search = true;
     rich_options.max_rice_partition_order = 4;
     // Plain: mono 24-bit at a table rate with every option off, wasted-bits
     // detection included, so stale LPC, partitioning and options would show
@@ -1248,7 +1264,7 @@ void check_lpc() {
     // checked at 8 bits, where quantization noise swamps what a predictor
     // can remove: on real music even reference flac gains under 1% there,
     // and this synthetic signal gains nothing. A build without LPC must
-    // instead ignore the option: byte-identical output.
+    // instead ignore the option: byte-identical output, stereo search too.
     for (const uint32_t bits : {12U, 16U, 20U, 24U}) {
         if (beyond_lpc_depth(bits)) {
             continue;
@@ -1258,17 +1274,23 @@ void check_lpc() {
             const std::vector<uint8_t> tonal = make_tonal(frames, channels, bits);
             std::vector<uint8_t> without;
             std::vector<uint8_t> with;
+            std::vector<uint8_t> searched;
             encoded_size(make_format(channels, bits), make_options(BLOCK), tonal, &without);
             encoded_size(make_format(channels, bits), make_lpc_options(BLOCK, 8), tonal, &with);
+            FLACEncoderOptions search = make_lpc_options(BLOCK, 8);
+            search.lpc_stereo_search = true;
+            encoded_size(make_format(channels, bits), search, tonal, &searched);
             char label[128];
             if (FLACEncoder::LPC_AVAILABLE) {
-                std::snprintf(label, sizeof(label), "%u-bit %u ch tonal: LPC smaller (%zu vs %zu)",
-                              bits, channels, with.size(), without.size());
-                check_true(label, !with.empty() && with.size() < without.size());
+                std::snprintf(label, sizeof(label),
+                              "%u-bit %u ch tonal: LPC smaller (%zu vs %zu, search %zu)", bits,
+                              channels, with.size(), without.size(), searched.size());
+                check_true(label, !with.empty() && with.size() < without.size() &&
+                                      !searched.empty() && searched.size() < without.size());
             } else {
                 std::snprintf(label, sizeof(label), "%u-bit %u ch: lpc ignored (built without)",
                               bits, channels);
-                check_true(label, !without.empty() && with == without);
+                check_true(label, !without.empty() && with == without && searched == without);
             }
         }
     }
@@ -1338,7 +1360,9 @@ void check_lpc() {
     }
 
     // Stereo assignment still comes from Pass A: every assignment is chosen
-    // exactly as without LPC, and round-trips.
+    // exactly as without LPC, and round-trips. With the stereo search it may
+    // differ (it chooses from LPC's estimates too), so there only the round
+    // trip is checked.
     struct Case {
         StereoCase which;
         uint8_t code;
@@ -1356,6 +1380,13 @@ void check_lpc() {
         }
         for (const Case& c : CASES) {
             char label[96];
+            std::snprintf(label, sizeof(label), "%u-bit %s with LPC stereo search", bits, c.name);
+            const std::vector<uint8_t> searched_pcm = make_stereo(frames, bits, c.which);
+            FLACEncoderOptions search = make_lpc_options(BLOCK, 8);
+            search.lpc_stereo_search = true;
+            FLACEncoder searched_encoder(make_format(2, bits), search);
+            check_true(label, encode_decode_matches(searched_encoder, searched_pcm, searched_pcm,
+                                                    frames, label));
             std::snprintf(label, sizeof(label), "%u-bit %s with LPC", bits, c.name);
             const std::vector<uint8_t> pcm = make_stereo(frames, bits, c.which);
             FLACEncoder e(make_format(2, bits), make_lpc_options(BLOCK, 8));
@@ -1368,7 +1399,170 @@ void check_lpc() {
             check_true(label, ok && all_chosen);
         }
     }
+
+    // The stereo search end to end: round trips at every depth LPC takes, at
+    // block sizes with partial kernel pieces, on tonal stereo and on
+    // near-mono input whose side is a sample apart at most, and past
+    // LPC_STEREO_WIDE_MAX_SAMPLES, where the wide path designs each
+    // candidate alone. check_stereo_autocorrelation() checks the derived
+    // sums themselves, which a round trip cannot.
+    const int search_failures_before = failures;
+    for (const uint32_t bits : {12U, 16U, 20U, 24U}) {
+        if (beyond_lpc_depth(bits)) {
+            continue;
+        }
+        const uint32_t bytes = (bits + 7) / 8;
+        for (const uint32_t block : {16U, 17U, 1000U, 4096U, 40000U}) {
+            const uint32_t n = (block * 2) + 7;
+            const std::vector<uint8_t> tonal = make_tonal(n, 2, bits);
+            // Near-mono: make_tonal()'s left channel, and a right a sample
+            // apart at most, so the side is {-1, 0, 1}.
+            std::vector<uint8_t> near_mono(tonal.size());
+            const double amp = static_cast<double>(1U << (bits - 1)) / 4.0;
+            const int32_t peak = static_cast<int32_t>((1U << (bits - 1)) - 1U);
+            for (uint32_t i = 0; i < n; i++) {
+                const double t = static_cast<double>(i);
+                const int32_t l = static_cast<int32_t>(amp * ((0.55 * std::sin(t / 97.3)) +
+                                                              (0.3 * std::sin(t / 23.1)) +
+                                                              (0.15 * std::sin(t / 7.7))));
+                int32_t r = l + static_cast<int32_t>(i % 3) - 1;
+                r = (r > peak) ? peak : r;
+                const size_t pos = static_cast<size_t>(i) * 2 * bytes;
+                pack_sample(&near_mono[pos], l, bits, bytes, 0);
+                pack_sample(&near_mono[pos + bytes], r, bits, bytes, 0);
+            }
+            FLACEncoderOptions search = make_lpc_options(block, 12);
+            search.lpc_stereo_search = true;
+            char label[96];
+            std::snprintf(label, sizeof(label), "%u-bit block %u search tonal", bits, block);
+            FLACEncoder tonal_encoder(make_format(2, bits), search);
+            if (!encode_decode_matches(tonal_encoder, tonal, tonal, n, label)) {
+                failures++;
+                std::printf("  %-44s <-- FAIL\n", label);
+            }
+            std::snprintf(label, sizeof(label), "%u-bit block %u search near-mono", bits, block);
+            FLACEncoder mono_encoder(make_format(2, bits), search);
+            if (!encode_decode_matches(mono_encoder, near_mono, near_mono, n, label)) {
+                failures++;
+                std::printf("  %-44s <-- FAIL\n", label);
+            }
+        }
+    }
+    std::printf("  stereo search x {12, 16, 20, 24}-bit x blocks {16, 17, 1000, 4096, 40000}: %s\n",
+                failures == search_failures_before ? "all bit-exact" : "see failures above");
 }
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+// The stereo search's joint autocorrelation against brute force. Left and
+// right are windowed once and their sum correlated; mid's and side's sums are
+// derived from the three by (a + b)(c + d) + (a - b)(c - d) = 2(ac + bd). Each
+// piece's windowed right and windowed sum are read back from the work
+// buffers, and every lag is recomputed from them directly: left's and
+// right's, mid's (the sum's / 4) and side's (left minus right's, at side's
+// scale). Covers full-scale, anti-phase, near-mono and random input, the
+// narrow path's 17-bit side and the wide path at LPC_STEREO_WIDE_MAX_SAMPLES,
+// with finish() writing over left's and right's as the encoder does. Any
+// predictor round trips, so only this catches a wrong sum or scale.
+void check_stereo_autocorrelation() {
+    std::printf("\nStereo search's joint autocorrelation (brute force):\n");
+    enum Input : uint8_t { FULL_SCALE_SAME, FULL_SCALE_ANTI, ALTERNATING, NEAR_MONO, RANDOM };
+    struct Case {
+        uint32_t bits;
+        bool wide;
+    };
+    const std::vector<Case> cases = {{12, false}, {16, false}, {20, true}, {24, true}};
+    uint32_t checked = 0;
+    const int failures_before = failures;
+    for (const Case& c : cases) {
+        const int32_t peak = static_cast<int32_t>((1U << (c.bits - 1)) - 1U);
+        for (const uint32_t n : {2U, 13U, 129U, 4096U, LPC_STEREO_WIDE_MAX_SAMPLES}) {
+            for (const Input input :
+                 {FULL_SCALE_SAME, FULL_SCALE_ANTI, ALTERNATING, NEAR_MONO, RANDOM}) {
+                std::vector<int32_t> left(n);
+                std::vector<int32_t> right(n);
+                uint32_t seed = (c.bits * 7919U) + n + (static_cast<uint32_t>(input) * 104729U);
+                for (uint32_t i = 0; i < n; i++) {
+                    seed = (seed * 1664525U) + 1013904223U;
+                    const int32_t noise = static_cast<int32_t>(seed >> (32 - c.bits)) - peak - 1;
+                    const int32_t sign = ((i & 1U) != 0) ? -1 : 1;
+                    switch (input) {
+                        case FULL_SCALE_SAME:
+                            left[i] = peak;
+                            right[i] = peak;
+                            break;
+                        case FULL_SCALE_ANTI:
+                            left[i] = peak;
+                            right[i] = -peak - 1;
+                            break;
+                        case ALTERNATING:
+                            left[i] = sign * peak;
+                            right[i] = -sign * peak;
+                            break;
+                        case NEAR_MONO:
+                            left[i] = (noise == peak) ? peak - 1 : noise;
+                            right[i] = left[i] + static_cast<int32_t>(seed >> 31);
+                            break;
+                        case RANDOM:
+                            left[i] = noise;
+                            seed = (seed * 1664525U) + 1013904223U;
+                            right[i] = static_cast<int32_t>(seed >> (32 - c.bits)) - peak - 1;
+                            break;
+                    }
+                }
+                const uint32_t lags = (n - 1 < LPC_MAX_ORDER) ? n - 1 : LPC_MAX_ORDER;
+                LpcStereoAutocorrelation st{};
+                lpc_stereo_autocorrelation_begin(st, n, lags, c.bits, c.wide);
+                int32_t work_left[LPC_WORK_SAMPLES];
+                int32_t work_right[LPC_WORK_SAMPLES];
+                std::vector<int64_t> wl;  // Windowed left, right and sum, read back
+                std::vector<int64_t> wr;
+                std::vector<int64_t> ws;
+                for (uint32_t start = 0; start < n; start += LPC_KERNEL_SAMPLES) {
+                    const uint32_t len =
+                        (n - start < LPC_KERNEL_SAMPLES) ? n - start : LPC_KERNEL_SAMPLES;
+                    lpc_stereo_autocorrelation_update(st, &left[start], &right[start], len,
+                                                      work_left, work_right);
+                    for (uint32_t i = 0; i < len; i++) {
+                        const int64_t r = work_right[LPC_MAX_ORDER + i];
+                        const int64_t s = work_left[LPC_MAX_ORDER + i];
+                        wl.push_back(s - r);
+                        wr.push_back(r);
+                        ws.push_back(s);
+                    }
+                }
+                const LpcAutocorrelation left_ac = st.left;
+                const LpcAutocorrelation right_ac = st.right;
+                lpc_stereo_autocorrelation_finish(st, st.left, st.right);
+                const uint32_t side_shift = 2 * st.right.scale_shift;
+                for (uint32_t l = 0; l <= lags; l++) {
+                    int64_t sum_l = 0;
+                    int64_t sum_r = 0;
+                    int64_t sum_s = 0;
+                    int64_t sum_d = 0;
+                    for (uint32_t i = l; i < n; i++) {
+                        sum_l += wl[i] * wl[i - l];
+                        sum_r += wr[i] * wr[i - l];
+                        sum_s += ws[i] * ws[i - l];
+                        sum_d += (wl[i] - wr[i]) * (wl[i - l] - wr[i - l]);
+                    }
+                    const bool ok = left_ac.sum[l] == sum_l && right_ac.sum[l] == sum_r &&
+                                    st.left.sum[l] == sum_s / 4 &&
+                                    st.right.sum[l] == (sum_d >> side_shift);
+                    if (!ok) {
+                        failures++;
+                        std::printf("  %u-bit n %u input %d lag %u  <-- FAIL\n", c.bits, n,
+                                    static_cast<int>(input), l);
+                    }
+                    checked++;
+                }
+            }
+        }
+    }
+    std::printf("  %u lag sums at {12, 16, 20, 24}-bit x n {2 .. %u} x 5 inputs: %s\n", checked,
+                LPC_STEREO_WIDE_MAX_SAMPLES,
+                failures == failures_before ? "all exact" : "see failures above");
+}
+#endif
 
 // ============================================================================
 // Rice partitioning
@@ -1458,9 +1652,9 @@ void check_partitions() {
     std::printf("  {4-24}-bit x {1, 2, 5} ch x lpc {off, 12} x 4 block sizes: %s\n",
                 failures == failures_before ? "all bit-exact" : "see failures above");
 
-    // It has to pay off on bursty input, with fixed predictors and LPC; a
-    // build without partitioning must instead ignore the option, byte for
-    // byte.
+    // It has to pay off on bursty input, with fixed predictors, LPC, and the
+    // stereo search; a build without partitioning must instead ignore the
+    // option, byte for byte.
     for (const uint32_t bits : {12U, 16U, 24U}) {
         for (const uint32_t channels : {1U, 2U, 5U}) {
             const uint32_t frames = BLOCK * 3;
@@ -1469,16 +1663,22 @@ void check_partitions() {
                 FLACEncoderOptions plain = make_partition_options(BLOCK, lpc_order);
                 plain.max_rice_partition_order = 0;
                 FLACEncoderOptions partitioned = make_partition_options(BLOCK, lpc_order);
+                FLACEncoderOptions searched = partitioned;
+                searched.lpc_stereo_search = true;
                 std::vector<uint8_t> without;
                 std::vector<uint8_t> with;
+                std::vector<uint8_t> with_search;
                 encoded_size(make_format(channels, bits), plain, bursty, &without);
                 encoded_size(make_format(channels, bits), partitioned, bursty, &with);
+                encoded_size(make_format(channels, bits), searched, bursty, &with_search);
                 char label[128];
                 if (FLACEncoder::RICE_PARTITIONS_AVAILABLE) {
                     std::snprintf(label, sizeof(label),
                                   "%u-bit %u ch lpc %u bursty: partitions smaller (%zu vs %zu)",
                                   bits, channels, lpc_order, with.size(), without.size());
-                    check_true(label, !with.empty() && with.size() < without.size());
+                    check_true(label, !with.empty() && with.size() < without.size() &&
+                                          !with_search.empty() &&
+                                          with_search.size() < without.size());
                 } else {
                     std::snprintf(label, sizeof(label),
                                   "%u-bit %u ch lpc %u: partitions ignored (built without)", bits,
@@ -1584,7 +1784,8 @@ void check_wasted_bits() {
     // Round trips across formats, with every channel sharing 1, 4 or 8
     // wasted bits, with a different count per channel (so mid and side get
     // their own), and with one channel silent. Fixed predictors, partitions,
-    // LPC alone and with partitions; the option off; and
+    // LPC and the stereo search, whose joint autocorrelation gives way to
+    // per-candidate designs in a frame with wasted bits; the option off; and
     // forced independent stereo, whose Pass A finds left's and right's
     // wasted bits without deriving mid and side.
     struct Format {
@@ -1617,6 +1818,7 @@ void check_wasted_bits() {
                     }
                     if (opt >= 2 && opt <= 3) {
                         options.lpc = true;
+                        options.lpc_stereo_search = (opt == 3);
                     }
                     options.wasted_bits = (opt != 4);
                     char label[96];
@@ -1709,6 +1911,7 @@ void check_wasted_bits() {
         for (const bool lpc : {false, true}) {
             FLACEncoderOptions options = make_options(4096);
             options.lpc = lpc;
+            options.lpc_stereo_search = lpc;
             options.max_rice_partition_order = lpc ? 6 : 0;
             const std::vector<uint8_t> input = make_wasted(n, f.channels, f.bits, none);
             std::vector<uint8_t> on;
@@ -1752,6 +1955,7 @@ void check_unaligned_input_end() {
                     if (lpc_order != 0 && FLACEncoder::LPC_AVAILABLE) {
                         options.lpc = true;
                         options.max_lpc_order = static_cast<uint8_t>(lpc_order);
+                        options.lpc_stereo_search = true;
                         options.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER;
                     }
                     char label[96];
@@ -1797,6 +2001,9 @@ int main() {  // NOLINT(bugprone-exception-escape)
     check_unaligned_input_end();
     check_scan_worst_case();
     check_lpc();
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+    check_stereo_autocorrelation();
+#endif
     check_partitions();
     check_wasted_bits();
 
