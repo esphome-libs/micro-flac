@@ -55,6 +55,15 @@
 #define FLAC_NOINLINE
 #endif
 
+// Unroll the loop that follows up to n times. GCC and Clang both take the GCC
+// spelling; other compilers get no hint.
+#if defined(__GNUC__) || defined(__clang__)
+#define FLAC_PRAGMA(x) _Pragma(#x)
+#define FLAC_UNROLL(n) FLAC_PRAGMA(GCC unroll n)
+#else
+#define FLAC_UNROLL(n)
+#endif
+
 // Branch prediction hints
 #if defined(__GNUC__) || defined(__clang__)
 #define FLAC_LIKELY(x) __builtin_expect(!!(x), 1)

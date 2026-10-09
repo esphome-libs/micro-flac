@@ -83,6 +83,16 @@ PcmFormat make_format(uint32_t channels, uint32_t bits, uint32_t rate = RATE) {
     return PcmFormat(rate, channels, bits);
 }
 
+// Whether a stream is deeper than this build's LPC: past
+// MAX_LPC_BITS_PER_SAMPLE (24), or past 16 bits in a build without LPC (where
+// shallower streams still run, to check the option is ignored).
+bool beyond_lpc_depth(uint32_t bits) {
+    // cppcheck-suppress knownConditionTrueFalse
+    const uint32_t limit =
+        (FLACEncoder::MAX_LPC_BITS_PER_SAMPLE > 16) ? FLACEncoder::MAX_LPC_BITS_PER_SAMPLE : 16U;
+    return bits > limit;
+}
+
 FLACEncoderOptions make_options(uint32_t block_size) {
     FLACEncoderOptions options;
     options.block_size = block_size;
@@ -152,6 +162,28 @@ void check_config_validation() {
     }
 
     {
+        FLACEncoderOptions lpc = defaults;
+        lpc.lpc = true;
+        lpc.max_lpc_order = 0;
+        check("lpc with max_lpc_order 0", first_use(make_format(2, 16), lpc),
+              FLAC_ENCODER_ERROR_BAD_CONFIG);
+        lpc.max_lpc_order = FLACEncoder::MAX_LPC_ORDER + 1;
+        check("lpc with max_lpc_order 13 (above max)", first_use(make_format(2, 16), lpc),
+              FLAC_ENCODER_ERROR_BAD_CONFIG);
+        lpc.max_lpc_order = 1;
+        check("lpc with max_lpc_order 1 (min)", first_use(make_format(2, 16), lpc),
+              FLAC_ENCODER_SUCCESS);
+        lpc.max_lpc_order = FLACEncoder::MAX_LPC_ORDER;
+        check("lpc with max_lpc_order 12 (max)", first_use(make_format(2, 16), lpc),
+              FLAC_ENCODER_SUCCESS);
+        check("lpc on a 24-bit stream", first_use(make_format(2, 24), lpc), FLAC_ENCODER_SUCCESS);
+        lpc.lpc = false;
+        lpc.max_lpc_order = 0;
+        check("max_lpc_order 0 with lpc off (ignored)", first_use(make_format(2, 16), lpc),
+              FLAC_ENCODER_SUCCESS);
+    }
+
+    {
         // Validated the same way whether or not the build has partitioning.
         FLACEncoderOptions partitioned = defaults;
         partitioned.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER;
@@ -167,12 +199,15 @@ void check_config_validation() {
     {
         // get_options() hands back the options as passed, even ones a build ignores
         FLACEncoderOptions options = make_options(1152);
+        options.lpc = true;
+        options.max_lpc_order = 5;
         options.max_rice_partition_order = 3;
         options.wasted_bits = false;
         const FLACEncoder e(make_format(2, 16), options);
         const FLACEncoderOptions& got = e.get_options();
         check_true("get_options() returns the options passed",
-                   got.block_size == 1152 && got.max_rice_partition_order == 3 && !got.wasted_bits);
+                   got.block_size == 1152 && got.lpc && got.max_lpc_order == 5 &&
+                       got.max_rice_partition_order == 3 && !got.wasted_bits);
     }
 
     std::printf("\nUnsupported configurations fail every call until reconfigured:\n");
@@ -844,6 +879,7 @@ bool matches_fresh(const FLACEncoder& e, const PcmFormat& format,
         e.sample_rate_extra_[0] == fresh.sample_rate_extra_[0] &&
         e.sample_rate_extra_[1] == fresh.sample_rate_extra_[1] &&
         e.sample_rate_extra_len_ == fresh.sample_rate_extra_len_ &&
+        e.lpc_max_order_ == fresh.lpc_max_order_ && e.lpc_precision_ == fresh.lpc_precision_ &&
         e.max_partition_order_ == fresh.max_partition_order_ &&
         e.total_samples_ == fresh.total_samples_ && e.frame_number_ == fresh.frame_number_ &&
         e.min_frame_bytes_ == fresh.min_frame_bytes_ &&
@@ -851,7 +887,8 @@ bool matches_fresh(const FLACEncoder& e, const PcmFormat& format,
         e.get_pcm_format().sample_rate() == format.sample_rate() &&
         e.get_pcm_format().num_channels() == format.num_channels() &&
         e.get_pcm_format().bits_per_sample() == format.bits_per_sample() &&
-        e.get_options().block_size == options.block_size &&
+        e.get_options().block_size == options.block_size && e.get_options().lpc == options.lpc &&
+        e.get_options().max_lpc_order == options.max_lpc_order &&
         e.get_options().max_rice_partition_order == options.max_rice_partition_order &&
         e.get_options().wasted_bits == options.wasted_bits;
     return same;
@@ -872,14 +909,16 @@ bool encodes_like_fresh(FLACEncoder& e, const PcmFormat& format, const FLACEncod
 void check_reconfigure() {
     std::printf("\nreset(format, options) leaves the encoder as the constructor would:\n");
 
-    // Rich: a sample rate carried in two extra header bytes (code 13) and
-    // partitioning, so every derived field is set (where the build compiles
-    // partitioning in)
+    // Rich: a sample rate carried in two extra header bytes (code 13), LPC
+    // and partitioning, so every derived field is set
+    // (where the build compiles its feature in)
     const PcmFormat rich = make_format(2, 16, 22051);
     FLACEncoderOptions rich_options = make_options(1152);
+    rich_options.lpc = true;
+    rich_options.max_lpc_order = 8;
     rich_options.max_rice_partition_order = 4;
     // Plain: mono 24-bit at a table rate with every option off, wasted-bits
-    // detection included, so stale partitioning and options would show
+    // detection included, so stale LPC, partitioning and options would show
     const PcmFormat plain = make_format(1, 24, 48000);
     FLACEncoderOptions plain_options = make_options(BLOCK);
     plain_options.wasted_bits = false;
@@ -1100,6 +1139,47 @@ void check_scan_worst_case() {
                 failures == failures_before ? "all bit-exact" : "see failures above");
 }
 
+// ============================================================================
+// LPC subframes
+// ============================================================================
+
+FLACEncoderOptions make_lpc_options(uint32_t block_size, uint32_t max_order) {
+    FLACEncoderOptions options = make_options(block_size);
+    options.lpc = true;
+    options.max_lpc_order = static_cast<uint8_t>(max_order);
+    return options;
+}
+
+// Tonal input that linear prediction clearly beats the fixed predictors on:
+// three sines per channel (phases differ between channels) under ~1/4 of
+// full scale, plus a few LSBs of noise. Packed with the unused low bits
+// clear, so it is also the expected decoder output.
+std::vector<uint8_t> make_tonal(uint32_t n, uint32_t channels, uint32_t bits) {
+    const uint32_t bytes = (bits + 7) / 8;
+    const double amp = static_cast<double>(1U << (bits - 1)) / 4.0;
+    const uint32_t noise_span = (bits > 10) ? (1U << (bits - 10)) : 1U;
+    std::vector<uint8_t> out(static_cast<size_t>(n) * channels * bytes);
+    uint32_t state = 0x2545F491U;
+    size_t pos = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        for (uint32_t c = 0; c < channels; c++) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            const double t = static_cast<double>(i);
+            const double phase = static_cast<double>(c);
+            const double v = (0.55 * std::sin((t / 97.3) + phase)) +
+                             (0.3 * std::sin((t / 23.1) + (2.0 * phase))) +
+                             (0.15 * std::sin(t / 7.7));
+            const int32_t noise =
+                static_cast<int32_t>(state % noise_span) - static_cast<int32_t>(noise_span / 2);
+            pack_sample(&out[pos], static_cast<int32_t>(amp * v) + noise, bits, bytes, 0);
+            pos += bytes;
+        }
+    }
+    return out;
+}
+
 // Encode `packed` whole and return the stream's size, or 0 on failure.
 size_t encoded_size(const PcmFormat& format, const FLACEncoderOptions& options,
                     const std::vector<uint8_t>& packed,
@@ -1115,20 +1195,200 @@ size_t encoded_size(const PcmFormat& format, const FLACEncoderOptions& options,
     return stream.size();
 }
 
+void check_lpc() {
+    std::printf("\nLPC subframes (FLACEncoderOptions::lpc):\n");
+
+    // Round trips at every depth LPC applies to, in 1, 2 and 5 channels,
+    // at the lowest, default and highest orders. The block sizes include the
+    // minimum, a size that is not a multiple of the kernel's 128 samples, and
+    // the default; round_trip-style input adds a 7-sample final frame, shorter
+    // than an order-12 predictor, which caps the order at 6 there. The wide
+    // path starts at 17 bits: every subframe of a 17-bit stream takes it, the
+    // 17-bit ones included.
+    const int failures_before = failures;
+    for (const uint32_t bits : {4U, 8U, 12U, 16U, 17U, 20U, 24U}) {
+        if (beyond_lpc_depth(bits)) {
+            continue;  // Deeper streams ignore the option (checked below)
+        }
+        for (const uint32_t channels : {1U, 2U, 5U}) {
+            for (const uint32_t order : {1U, 8U, 12U}) {
+                for (const uint32_t block : {16U, 192U, 1000U, 4096U}) {
+                    const uint32_t frames = (block * 3) + 7;
+                    const FLACEncoderOptions options = make_lpc_options(block, order);
+                    char label[96];
+                    std::snprintf(label, sizeof(label), "%u-bit %u ch order %u block %u tonal",
+                                  bits, channels, order, block);
+                    const std::vector<uint8_t> tonal = make_tonal(frames, channels, bits);
+                    FLACEncoder tonal_encoder(make_format(channels, bits), options);
+                    if (!encode_decode_matches(tonal_encoder, tonal, tonal, frames, label)) {
+                        failures++;
+                        std::printf("  %-44s <-- FAIL\n", label);
+                    }
+                    std::snprintf(label, sizeof(label), "%u-bit %u ch order %u block %u mixed",
+                                  bits, channels, order, block);
+                    std::vector<uint8_t> packed;
+                    std::vector<uint8_t> expected;
+                    make_signal(frames, channels, bits, packed, expected);
+                    FLACEncoder mixed_encoder(make_format(channels, bits), options);
+                    if (!encode_decode_matches(mixed_encoder, packed, expected, frames, label)) {
+                        failures++;
+                        std::printf("  %-44s <-- FAIL\n", label);
+                    }
+                }
+            }
+        }
+    }
+    // The depths listed depend on the build
+    std::printf("  {4, 8, 12, 16%s}-bit x {1, 2, 5} ch x orders {1, 8, 12} x 4 block sizes: %s\n",
+                // cppcheck-suppress knownConditionTrueFalse
+                beyond_lpc_depth(17) ? "" : ", 17, 20, 24",
+                failures == failures_before ? "all bit-exact" : "see failures above");
+
+    // It has to pay off: tonal input must come out smaller with LPC. Not
+    // checked at 8 bits, where quantization noise swamps what a predictor
+    // can remove: on real music even reference flac gains under 1% there,
+    // and this synthetic signal gains nothing. A build without LPC must
+    // instead ignore the option: byte-identical output.
+    for (const uint32_t bits : {12U, 16U, 20U, 24U}) {
+        if (beyond_lpc_depth(bits)) {
+            continue;
+        }
+        for (const uint32_t channels : {1U, 2U, 5U}) {
+            const uint32_t frames = BLOCK * 3;
+            const std::vector<uint8_t> tonal = make_tonal(frames, channels, bits);
+            std::vector<uint8_t> without;
+            std::vector<uint8_t> with;
+            encoded_size(make_format(channels, bits), make_options(BLOCK), tonal, &without);
+            encoded_size(make_format(channels, bits), make_lpc_options(BLOCK, 8), tonal, &with);
+            char label[128];
+            if (FLACEncoder::LPC_AVAILABLE) {
+                std::snprintf(label, sizeof(label), "%u-bit %u ch tonal: LPC smaller (%zu vs %zu)",
+                              bits, channels, with.size(), without.size());
+                check_true(label, !with.empty() && with.size() < without.size());
+            } else {
+                std::snprintf(label, sizeof(label), "%u-bit %u ch: lpc ignored (built without)",
+                              bits, channels);
+                check_true(label, !without.empty() && with == without);
+            }
+        }
+    }
+
+    // Streams deeper than this build's LPC reaches ignore the option:
+    // byte-identical output. (Only in a build without LPC.)
+    for (const uint32_t bits : {17U, 20U, 24U}) {
+        if (!beyond_lpc_depth(bits)) {
+            continue;
+        }
+        const uint32_t frames = (BLOCK * 2) + 7;
+        const std::vector<uint8_t> tonal = make_tonal(frames, 2, bits);
+        std::vector<uint8_t> off;
+        std::vector<uint8_t> on;
+        encoded_size(make_format(2, bits), make_options(BLOCK), tonal, &off);
+        encoded_size(make_format(2, bits), make_lpc_options(BLOCK, 12), tonal, &on);
+        char label[96];
+        std::snprintf(label, sizeof(label), "%u-bit stereo: output unchanged by lpc", bits);
+        check_true(label, !off.empty() && off == on);
+    }
+
+    // Full-scale extremes (the largest residuals, and the widest side
+    // channel), silence and DC, at 16 and 24 bits (whose residuals the wide
+    // path must bound in 64 bits).
+    const uint32_t frames = (BLOCK * 2) + 7;
+    struct Extreme {
+        const char* name;
+        int32_t (*sample)(uint32_t i, uint32_t c, int32_t peak);
+    };
+    static const Extreme EXTREMES[] = {
+        {"alternation in phase",
+         [](uint32_t i, uint32_t, int32_t peak) { return (i % 2 == 0) ? peak : -peak - 1; }},
+        {"alternation in antiphase",
+         [](uint32_t i, uint32_t c, int32_t peak) {
+             return ((i + c) % 2 == 0) ? peak : -peak - 1;
+         }},
+        {"full-scale square, period 6",
+         [](uint32_t i, uint32_t c, int32_t peak) {
+             return (((i + c) / 3) % 2 == 0) ? peak : -peak - 1;
+         }},
+        {"silence", [](uint32_t, uint32_t, int32_t) { return 0; }},
+        {"DC", [](uint32_t, uint32_t, int32_t) { return -1234; }},
+    };
+    for (const uint32_t bits : {16U, 24U}) {
+        if (beyond_lpc_depth(bits)) {
+            continue;
+        }
+        const uint32_t bytes = bits / 8;
+        const int32_t peak = static_cast<int32_t>((1U << (bits - 1)) - 1U);
+        for (const Extreme& x : EXTREMES) {
+            for (const uint32_t channels : {1U, 2U}) {
+                std::vector<uint8_t> packed(static_cast<size_t>(frames) * channels * bytes);
+                size_t pos = 0;
+                for (uint32_t i = 0; i < frames; i++) {
+                    for (uint32_t c = 0; c < channels; c++) {
+                        pack_sample(&packed[pos], x.sample(i, c, peak), bits, bytes, 0);
+                        pos += bytes;
+                    }
+                }
+                char label[96];
+                std::snprintf(label, sizeof(label), "%u-bit %u ch %s, order 12", bits, channels,
+                              x.name);
+                FLACEncoder encoder(make_format(channels, bits), make_lpc_options(BLOCK, 12));
+                check_true(label, encode_decode_matches(encoder, packed, packed, frames, label));
+            }
+        }
+    }
+
+    // Stereo assignment still comes from Pass A: every assignment is chosen
+    // exactly as without LPC, and round-trips.
+    struct Case {
+        StereoCase which;
+        uint8_t code;
+        const char* name;
+    };
+    static const Case CASES[] = {
+        {StereoCase::LEFT_SIDE, 8, "left/side"},
+        {StereoCase::RIGHT_SIDE, 9, "right/side"},
+        {StereoCase::MID_SIDE, 10, "mid/side"},
+        {StereoCase::INDEPENDENT, 1, "independent"},
+    };
+    for (const uint32_t bits : {12U, 16U, 24U}) {
+        if (beyond_lpc_depth(bits)) {
+            continue;
+        }
+        for (const Case& c : CASES) {
+            char label[96];
+            std::snprintf(label, sizeof(label), "%u-bit %s with LPC", bits, c.name);
+            const std::vector<uint8_t> pcm = make_stereo(frames, bits, c.which);
+            FLACEncoder e(make_format(2, bits), make_lpc_options(BLOCK, 8));
+            std::vector<uint8_t> modes;
+            const bool ok = encode_decode_matches(e, pcm, pcm, frames, label, &modes);
+            bool all_chosen = !modes.empty();
+            for (const uint8_t m : modes) {
+                all_chosen = all_chosen && (m == c.code);
+            }
+            check_true(label, ok && all_chosen);
+        }
+    }
+}
+
 // ============================================================================
 // Rice partitioning
 // ============================================================================
 
-FLACEncoderOptions make_partition_options(uint32_t block_size) {
+FLACEncoderOptions make_partition_options(uint32_t block_size, uint32_t max_lpc_order) {
     FLACEncoderOptions options = make_options(block_size);
     options.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER;
+    if (max_lpc_order != 0) {
+        options.lpc = true;
+        options.max_lpc_order = static_cast<uint8_t>(max_lpc_order);
+    }
     return options;
 }
 
-// A tone under noise whose level changes every 256 samples, from none to
-// about 1/1000 of full scale: what partitioning exists for, since one Rice
-// parameter per subframe then fits no stretch of it well. Packed with the
-// unused low bits clear, so it is also the expected decoder output.
+// make_tonal()'s tone under noise whose level changes every 256 samples, from
+// none to about 1/1000 of full scale: what partitioning exists for, since
+// one Rice parameter per subframe then fits no stretch of it well, while the
+// tone keeps LPC ahead of the fixed predictors. Packed with the unused low
+// bits clear, so it is also the expected decoder output.
 std::vector<uint8_t> make_bursty(uint32_t n, uint32_t channels, uint32_t bits) {
     const uint32_t bytes = (bits + 7) / 8;
     const double amp = static_cast<double>(1U << (bits - 1)) / 4.0;
@@ -1161,63 +1421,70 @@ std::vector<uint8_t> make_bursty(uint32_t n, uint32_t channels, uint32_t bits) {
 void check_partitions() {
     std::printf("\nRice partitioning (FLACEncoderOptions::max_rice_partition_order):\n");
 
-    // Round trips at order 6 at every depth, at block sizes that allow up to 2 (16, with an order-4
-    // predictor), 8 (1000 = 8 * 125) and 64 (192 with a predictor of order 2 or less; 4096)
+    // Round trips at order 6 at every depth, with and without LPC, at block
+    // sizes that allow up to 2 (16, with an order-4 predictor), 8 (1000 =
+    // 8 * 125) and 64 (192 with a predictor of order 2 or less; 4096)
     // partitions; the 7-sample final frame cannot be split at all.
     const int failures_before = failures;
     for (const uint32_t bits : {4U, 8U, 12U, 16U, 20U, 24U}) {
         for (const uint32_t channels : {1U, 2U, 5U}) {
-            for (const uint32_t block : {16U, 192U, 1000U, 4096U}) {
-                const uint32_t frames = (block * 3) + 7;
-                const FLACEncoderOptions options = make_partition_options(block);
-                char label[96];
-                std::snprintf(label, sizeof(label), "%u-bit %u ch block %u bursty", bits, channels,
-                              block);
-                const std::vector<uint8_t> bursty = make_bursty(frames, channels, bits);
-                FLACEncoder bursty_encoder(make_format(channels, bits), options);
-                if (!encode_decode_matches(bursty_encoder, bursty, bursty, frames, label)) {
-                    failures++;
-                    std::printf("  %-44s <-- FAIL\n", label);
-                }
-                std::snprintf(label, sizeof(label), "%u-bit %u ch block %u mixed", bits, channels,
-                              block);
-                std::vector<uint8_t> packed;
-                std::vector<uint8_t> expected;
-                make_signal(frames, channels, bits, packed, expected);
-                FLACEncoder mixed_encoder(make_format(channels, bits), options);
-                if (!encode_decode_matches(mixed_encoder, packed, expected, frames, label)) {
-                    failures++;
-                    std::printf("  %-44s <-- FAIL\n", label);
+            for (const uint32_t lpc_order : {0U, 12U}) {
+                for (const uint32_t block : {16U, 192U, 1000U, 4096U}) {
+                    const uint32_t frames = (block * 3) + 7;
+                    const FLACEncoderOptions options = make_partition_options(block, lpc_order);
+                    char label[96];
+                    std::snprintf(label, sizeof(label), "%u-bit %u ch lpc %u block %u bursty", bits,
+                                  channels, lpc_order, block);
+                    const std::vector<uint8_t> bursty = make_bursty(frames, channels, bits);
+                    FLACEncoder bursty_encoder(make_format(channels, bits), options);
+                    if (!encode_decode_matches(bursty_encoder, bursty, bursty, frames, label)) {
+                        failures++;
+                        std::printf("  %-44s <-- FAIL\n", label);
+                    }
+                    std::snprintf(label, sizeof(label), "%u-bit %u ch lpc %u block %u mixed", bits,
+                                  channels, lpc_order, block);
+                    std::vector<uint8_t> packed;
+                    std::vector<uint8_t> expected;
+                    make_signal(frames, channels, bits, packed, expected);
+                    FLACEncoder mixed_encoder(make_format(channels, bits), options);
+                    if (!encode_decode_matches(mixed_encoder, packed, expected, frames, label)) {
+                        failures++;
+                        std::printf("  %-44s <-- FAIL\n", label);
+                    }
                 }
             }
         }
     }
-    std::printf("  {4-24}-bit x {1, 2, 5} ch x 4 block sizes: %s\n",
+    std::printf("  {4-24}-bit x {1, 2, 5} ch x lpc {off, 12} x 4 block sizes: %s\n",
                 failures == failures_before ? "all bit-exact" : "see failures above");
 
-    // It has to pay off on bursty input; a build without partitioning must
-    // instead ignore the option, byte for byte.
+    // It has to pay off on bursty input, with fixed predictors and LPC; a
+    // build without partitioning must instead ignore the option, byte for
+    // byte.
     for (const uint32_t bits : {12U, 16U, 24U}) {
         for (const uint32_t channels : {1U, 2U, 5U}) {
             const uint32_t frames = BLOCK * 3;
             const std::vector<uint8_t> bursty = make_bursty(frames, channels, bits);
-            FLACEncoderOptions plain = make_partition_options(BLOCK);
-            plain.max_rice_partition_order = 0;
-            FLACEncoderOptions partitioned = make_partition_options(BLOCK);
-            std::vector<uint8_t> without;
-            std::vector<uint8_t> with;
-            encoded_size(make_format(channels, bits), plain, bursty, &without);
-            encoded_size(make_format(channels, bits), partitioned, bursty, &with);
-            char label[128];
-            if (FLACEncoder::RICE_PARTITIONS_AVAILABLE) {
-                std::snprintf(label, sizeof(label),
-                              "%u-bit %u ch bursty: partitions smaller (%zu vs %zu)", bits,
-                              channels, with.size(), without.size());
-                check_true(label, !with.empty() && with.size() < without.size());
-            } else {
-                std::snprintf(label, sizeof(label),
-                              "%u-bit %u ch: partitions ignored (built without)", bits, channels);
-                check_true(label, !without.empty() && with == without);
+            for (const uint32_t lpc_order : {0U, 8U}) {
+                FLACEncoderOptions plain = make_partition_options(BLOCK, lpc_order);
+                plain.max_rice_partition_order = 0;
+                FLACEncoderOptions partitioned = make_partition_options(BLOCK, lpc_order);
+                std::vector<uint8_t> without;
+                std::vector<uint8_t> with;
+                encoded_size(make_format(channels, bits), plain, bursty, &without);
+                encoded_size(make_format(channels, bits), partitioned, bursty, &with);
+                char label[128];
+                if (FLACEncoder::RICE_PARTITIONS_AVAILABLE) {
+                    std::snprintf(label, sizeof(label),
+                                  "%u-bit %u ch lpc %u bursty: partitions smaller (%zu vs %zu)",
+                                  bits, channels, lpc_order, with.size(), without.size());
+                    check_true(label, !with.empty() && with.size() < without.size());
+                } else {
+                    std::snprintf(label, sizeof(label),
+                                  "%u-bit %u ch lpc %u: partitions ignored (built without)", bits,
+                                  channels, lpc_order);
+                    check_true(label, !without.empty() && with == without);
+                }
             }
         }
     }
@@ -1259,10 +1526,15 @@ void check_partitions() {
                         pos += bytes;
                     }
                 }
-                char label[96];
-                std::snprintf(label, sizeof(label), "%u-bit %u ch %s", bits, channels, x.name);
-                FLACEncoder encoder(make_format(channels, bits), make_partition_options(BLOCK));
-                check_true(label, encode_decode_matches(encoder, packed, packed, frames, label));
+                for (const uint32_t lpc_order : {0U, 12U}) {
+                    char label[96];
+                    std::snprintf(label, sizeof(label), "%u-bit %u ch %s, lpc %u", bits, channels,
+                                  x.name, lpc_order);
+                    FLACEncoder encoder(make_format(channels, bits),
+                                        make_partition_options(BLOCK, lpc_order));
+                    check_true(label,
+                               encode_decode_matches(encoder, packed, packed, frames, label));
+                }
             }
         }
     }
@@ -1311,8 +1583,8 @@ void check_wasted_bits() {
 
     // Round trips across formats, with every channel sharing 1, 4 or 8
     // wasted bits, with a different count per channel (so mid and side get
-    // their own), and with one channel silent. Fixed predictors with and
-    // without partitions; the option off; and
+    // their own), and with one channel silent. Fixed predictors, partitions,
+    // LPC alone and with partitions; the option off; and
     // forced independent stereo, whose Pass A finds left's and right's
     // wasted bits without deriving mid and side.
     struct Format {
@@ -1338,10 +1610,13 @@ void check_wasted_bits() {
             for (const uint32_t block : {1152U, 4096U}) {
                 const uint32_t n = (2 * block) + 7;
                 const std::vector<uint8_t> input = make_wasted(n, f.channels, f.bits, wasted);
-                for (const uint32_t opt : {0U, 1U, 4U, 5U}) {
+                for (uint32_t opt = 0; opt < 6; opt++) {
                     FLACEncoderOptions options = make_options(block);
-                    if (opt == 1) {
+                    if (opt == 1 || opt == 3) {
                         options.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER;
+                    }
+                    if (opt >= 2 && opt <= 3) {
+                        options.lpc = true;
                     }
                     options.wasted_bits = (opt != 4);
                     char label[96];
@@ -1359,7 +1634,7 @@ void check_wasted_bits() {
         }
     }
     std::printf(
-        "  %u round trips (10 formats x 5 wasted-bit shapes x 2 block sizes x 4 options): %s\n",
+        "  %u round trips (10 formats x 5 wasted-bit shapes x 2 block sizes x 6 options): %s\n",
         cases, failures == failures_before ? "all bit-exact" : "see failures above");
 
     // 16-bit audio finds its wasted bits like every other depth. 8-bit audio
@@ -1431,9 +1706,10 @@ void check_wasted_bits() {
     // Without wasted bits the option changes nothing, byte for byte.
     int identical_failures = 0;
     for (const Format& f : formats) {
-        for (const bool partitioned : {false, true}) {
+        for (const bool lpc : {false, true}) {
             FLACEncoderOptions options = make_options(4096);
-            options.max_rice_partition_order = partitioned ? 6 : 0;
+            options.lpc = lpc;
+            options.max_rice_partition_order = lpc ? 6 : 0;
             const std::vector<uint8_t> input = make_wasted(n, f.channels, f.bits, none);
             std::vector<uint8_t> on;
             std::vector<uint8_t> off;
@@ -1442,8 +1718,8 @@ void check_wasted_bits() {
             encoded_size(make_format(f.channels, f.bits), options, input, &off);
             if (on != off || on.empty()) {
                 identical_failures++;
-                std::printf("  %uch %u-bit partitions %d: output differs with the option on\n",
-                            f.channels, f.bits, partitioned ? 1 : 0);
+                std::printf("  %uch %u-bit lpc %d: output differs with the option on\n", f.channels,
+                            f.bits, lpc ? 1 : 0);
             }
         }
     }
@@ -1463,33 +1739,42 @@ void check_unaligned_input_end() {
     for (const uint32_t bits : {17U, 24U}) {
         for (const uint32_t channels : {1U, 2U, 3U, 8U}) {
             for (const uint32_t block : {16U, 17U, 257U}) {
-                const uint32_t frames = (block * 2) + 5;
-                std::vector<uint8_t> packed;
-                std::vector<uint8_t> expected;
-                make_signal(frames, channels, bits, packed, expected);
-                // One byte of lead-in makes the start odd; the input's
-                // last byte is the allocation's last.
-                std::unique_ptr<uint8_t[]> buffer(new uint8_t[packed.size() + 1]);
-                std::memcpy(buffer.get() + 1, packed.data(), packed.size());
-                char label[96];
-                std::snprintf(label, sizeof(label), "%u-bit %u ch block %u", bits, channels, block);
-                FLACEncoder encoder(make_format(channels, bits), make_options(block));
-                std::vector<uint8_t> stream;
-                std::vector<uint8_t> decoded;
-                uint32_t rate = 0;
-                uint64_t total = 0;
-                const bool ok =
-                    encode_stream(encoder, buffer.get() + 1, packed.size(), stream, label) &&
-                    decode_stream(stream, decoded, rate, total, label) && total == frames &&
-                    decoded == expected;
-                if (!ok) {
-                    failures++;
-                    std::printf("  %-44s <-- FAIL\n", label);
+                for (const uint32_t lpc_order : {0U, 12U}) {
+                    const uint32_t frames = (block * 2) + 5;
+                    std::vector<uint8_t> packed;
+                    std::vector<uint8_t> expected;
+                    make_signal(frames, channels, bits, packed, expected);
+                    // One byte of lead-in makes the start odd; the input's
+                    // last byte is the allocation's last.
+                    std::unique_ptr<uint8_t[]> buffer(new uint8_t[packed.size() + 1]);
+                    std::memcpy(buffer.get() + 1, packed.data(), packed.size());
+                    FLACEncoderOptions options = make_options(block);
+                    if (lpc_order != 0 && FLACEncoder::LPC_AVAILABLE) {
+                        options.lpc = true;
+                        options.max_lpc_order = static_cast<uint8_t>(lpc_order);
+                        options.max_rice_partition_order = FLACEncoder::MAX_RICE_PARTITION_ORDER;
+                    }
+                    char label[96];
+                    std::snprintf(label, sizeof(label), "%u-bit %u ch block %u lpc %u", bits,
+                                  channels, block, lpc_order);
+                    FLACEncoder encoder(make_format(channels, bits), options);
+                    std::vector<uint8_t> stream;
+                    std::vector<uint8_t> decoded;
+                    uint32_t rate = 0;
+                    uint64_t total = 0;
+                    const bool ok =
+                        encode_stream(encoder, buffer.get() + 1, packed.size(), stream, label) &&
+                        decode_stream(stream, decoded, rate, total, label) && total == frames &&
+                        decoded == expected;
+                    if (!ok) {
+                        failures++;
+                        std::printf("  %-44s <-- FAIL\n", label);
+                    }
                 }
             }
         }
     }
-    std::printf("  {17, 24}-bit x {1, 2, 3, 8} ch x blocks {16, 17, 257}: %s\n",
+    std::printf("  {17, 24}-bit x {1, 2, 3, 8} ch x blocks {16, 17, 257} x lpc {off, 12}: %s\n",
                 failures == failures_before ? "all bit-exact" : "see failures above");
 }
 
@@ -1511,6 +1796,7 @@ int main() {  // NOLINT(bugprone-exception-escape)
     check_odd_depth_round_trips();
     check_unaligned_input_end();
     check_scan_worst_case();
+    check_lpc();
     check_partitions();
     check_wasted_bits();
 

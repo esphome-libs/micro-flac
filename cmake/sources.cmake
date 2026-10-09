@@ -18,6 +18,7 @@ function(flac_get_sources SOURCE_DIR)
         ${SOURCE_DIR}/src/lpc.cpp
         # Encoder
         ${SOURCE_DIR}/src/flac_encoder.cpp
+        ${SOURCE_DIR}/src/lpc_analysis.cpp
         PARENT_SCOPE
     )
 

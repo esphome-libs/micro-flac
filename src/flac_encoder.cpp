@@ -19,6 +19,7 @@
 #include "crc.h"
 #include "flac_format.h"
 #include "frame_header.h"
+#include "lpc_analysis.h"
 #include "pcm_packing.h"
 
 #include <cstdint>
@@ -51,6 +52,55 @@ static_assert(FLACEncoder::HEADER_BYTES == sizeof(MAGIC_BYTES) + 4 + STREAMINFO_
 // 2^(bps + o - 1), so the widest subframe, 24-bit stereo's 25-bit side at
 // order 4, stays below 2^28 and its zigzag below 2^29.
 constexpr uint32_t MAX_BITS_PER_SAMPLE = 24;
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+// LPC applies to every supported depth: the deepest stream's side subframe
+// must fit LPC_MAX_SUBFRAME_BPS (lpc_analysis.h).
+static_assert(LPC_MAX_SUBFRAME_BPS == MAX_BITS_PER_SAMPLE + 1,
+              "LPC must cover the deepest stream's side subframe");
+static_assert(FLACEncoder::MAX_LPC_BITS_PER_SAMPLE == MAX_BITS_PER_SAMPLE,
+              "the public LPC depth limit must match the encoder's");
+#endif
+static_assert(FLACEncoder::MAX_LPC_ORDER == LPC_MAX_ORDER,
+              "the public LPC order limit must match the analysis's");
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC  // LPC only
+
+// LPC coefficient precision to aim for (libFLAC's defaults): by block size at
+// 16 bits, 2 + bps/2 (at least 5) below that, and 13-15 by block size above
+// it. lpc_design() may lower it to keep the narrow path's residuals in 32 bits.
+uint32_t lpc_precision(uint32_t bits_per_sample, uint32_t block_size) {
+    // NOLINTBEGIN(readability-magic-numbers) -- libFLAC's precision table
+    if (bits_per_sample < 16) {
+        const uint32_t p = 2 + (bits_per_sample / 2);
+        return (p < 5) ? 5 : p;
+    }
+    if (bits_per_sample > 16) {
+        return (block_size <= 384) ? 13 : ((block_size <= 1152) ? 14 : 15);
+    }
+    if (block_size <= 192) {
+        return 7;
+    }
+    if (block_size <= 384) {
+        return 8;
+    }
+    if (block_size <= 576) {
+        return 9;
+    }
+    if (block_size <= 1152) {
+        return 10;
+    }
+    if (block_size <= 2304) {
+        return 11;
+    }
+    if (block_size <= 4608) {
+        return 12;
+    }
+    return 13;
+    // NOLINTEND(readability-magic-numbers)
+}
+
+#endif  // MICRO_FLAC_ENCODER_DISABLE_LPC
 
 // ============================================================================
 // Rice parameter estimation (Pass A helper)
@@ -840,8 +890,10 @@ FLAC_ALWAYS_INLINE void write_fixed_header(BitWriterLocal& bw, const PackedSigna
 // partitioning off, every other option runs the same code.
 
 #ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
-
 constexpr uint32_t MAX_PARTITION_ORDER = FLACEncoder::MAX_RICE_PARTITION_ORDER;
+#else
+constexpr uint32_t MAX_PARTITION_ORDER = 0;
+#endif
 constexpr uint32_t MAX_PARTITIONS = 1U << MAX_PARTITION_ORDER;
 
 // A subframe's Rice coding: 2^order partitions and each one's parameter
@@ -850,6 +902,8 @@ struct RicePartitions {
     uint8_t parameter_bits;  // 4, or 5 when any parameter exceeds RICE_PARAMETER_MAX_4BIT
     uint8_t k[MAX_PARTITIONS];
 };
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
 
 // Highest partition order up to max_order whose partition count divides n
 // and whose first partition keeps a residual
@@ -1032,9 +1086,10 @@ FLAC_ALWAYS_INLINE uint64_t unpartitioned_fixed(const ChannelAnalysis& analysis,
 
 // The partitioning of the FIXED subframe at Pass A's order that Pass B will
 // write, and its estimated size. A split is kept only when its bound proves
-// it smaller than VERBATIM (as write_partitioned_fixed() needs); a dropped
-// split, or a subframe too short to split, leaves analysis.estimated_bits.
-// Out of line so the leaf sums take stack only here.
+// it smaller than VERBATIM (as write_partitioned_fixed() needs), so LPC is
+// weighed against the FIXED subframe actually written; a dropped split, or a
+// subframe too short to split, leaves analysis.estimated_bits. Out of line so
+// the leaf sums take stack only here.
 FLAC_NOINLINE uint64_t partition_fixed(const PackedSignal& signal, uint32_t bps,
                                        const ChannelAnalysis& analysis, uint32_t max_order,
                                        RicePartitions& rice) {
@@ -1089,14 +1144,264 @@ FLAC_NOINLINE void write_partitioned_fixed(BitWriterLocal& bw, const PackedSigna
 
 #endif  // MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
 
-// How Pass B codes a frame's subframes. A build without partitioning reads
-// none of the fields.
+// ----------------------------------------------------------------------------
+// LPC subframes (FLACEncoderOptions::lpc)
+// ----------------------------------------------------------------------------
+//
+// Pass A picks the stereo assignment from the fixed predictors, and Pass B
+// tries LPC on the two subframes the frame carries. An attempt walks the
+// signal three times: the windowed autocorrelation, a residual magnitude sum
+// that prices the designed predictor in Pass A's terms (so
+// fixed_subframe_bits_bound()'s proof covers it), and, if LPC wins, emission.
+
+// How Pass B codes a frame's subframes. lpc_max_order 0 means no LPC. A
+// build without LPC or partitioning reads none of the fields it leaves out.
 struct SubframeSettings {
+    uint32_t lpc_max_order;        // cppcheck-suppress unusedStructMember
+    uint32_t lpc_precision;        // cppcheck-suppress unusedStructMember
     uint32_t max_partition_order;  // cppcheck-suppress unusedStructMember
 };
 
-// Write one subframe at depth bps: CONSTANT, FIXED (at its best
-// partitioning), or VERBATIM when FIXED cannot be proven smaller.
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC  // LPC only
+
+// A designed predictor, its Rice coding and its estimated subframe size
+struct LpcCandidate {
+    LpcPredictor predictor;
+    RicePartitions rice;
+    uint64_t estimated_bits;
+};
+
+// The kernels, pricing and header writer are out of line and shared, so the
+// walks themselves stay small.
+
+// Add a chunk's residual magnitudes to abs_sum, a kernel-sized piece at a time
+FLAC_NOINLINE void lpc_sum_chunk(const LpcPredictor& predictor, LpcResidualState& state,
+                                 const int32_t* samples, uint32_t m, int32_t* work,
+                                 uint64_t& abs_sum) {
+    for (uint32_t off = 0; off < m; off += LPC_KERNEL_SAMPLES) {
+        const uint32_t len = (m - off > LPC_KERNEL_SAMPLES) ? LPC_KERNEL_SAMPLES : (m - off);
+        abs_sum += lpc_residual_sum(predictor, state, samples + off, len, work);
+    }
+}
+
+// Write a chunk's residuals' Rice codes, a kernel-sized piece at a time
+FLAC_NOINLINE void lpc_emit_chunk(BitWriterLocal& bw, const LpcPredictor& predictor,
+                                  LpcResidualState& state, const int32_t* samples, uint32_t m,
+                                  int32_t* work, uint8_t k, bool capacity_proven) {
+    for (uint32_t off = 0; off < m; off += LPC_KERNEL_SAMPLES) {
+        const uint32_t len = (m - off > LPC_KERNEL_SAMPLES) ? LPC_KERNEL_SAMPLES : (m - off);
+        uint32_t count = 0;
+        const int32_t* r = lpc_residuals(predictor, state, samples + off, len, work, count);
+        emit_rice_codes(bw, r, count, k, capacity_proven);
+    }
+}
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+
+// lpc_sum_chunk() into leaf sums, each piece within one leaf
+FLAC_NOINLINE void lpc_sum_leaves(const LpcPredictor& predictor, LpcResidualState& state,
+                                  const int32_t* samples, uint32_t m, int32_t* work,
+                                  LeafSums& sums) {
+    for (uint32_t off = 0; off < m;) {
+        const uint32_t piece = (m - off > LPC_KERNEL_SAMPLES) ? LPC_KERNEL_SAMPLES : (m - off);
+        const uint32_t len = leaf_step(sums, piece);
+        // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.Assign) -- as in choose_partitions()
+        sums.sum[sums.index] += lpc_residual_sum(predictor, state, samples + off, len, work);
+        sums.pos += len;
+        off += len;
+    }
+}
+
+// lpc_emit_chunk() for a split subframe
+FLAC_NOINLINE void lpc_emit_partitioned(BitWriterLocal& bw, const LpcPredictor& predictor,
+                                        LpcResidualState& state, const int32_t* samples, uint32_t m,
+                                        int32_t* work, RiceEmitter& emitter) {
+    for (uint32_t off = 0; off < m; off += LPC_KERNEL_SAMPLES) {
+        const uint32_t len = (m - off > LPC_KERNEL_SAMPLES) ? LPC_KERNEL_SAMPLES : (m - off);
+        uint32_t count = 0;
+        const int32_t* r = lpc_residuals(predictor, state, samples + off, len, work, count);
+        emit_partitioned(bw, emitter, r, count);
+    }
+}
+
+#endif  // MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+
+// Bits of an LPC subframe's header up to its partition order: subframe
+// header, warmup, precision, shift, coefficients and coding method
+FLAC_ALWAYS_INLINE uint64_t lpc_header_bits(const LpcPredictor& predictor, uint32_t bps) {
+    return SUBFRAME_HEADER_BITS + (static_cast<uint64_t>(predictor.order) * bps) +
+           LPC_PRECISION_BITS + LPC_SHIFT_BITS +
+           (static_cast<uint64_t>(predictor.order) * predictor.precision) +
+           RESIDUAL_CODING_METHOD_BITS;
+}
+
+// Price a designed predictor from its residual magnitude sum, in the same
+// terms as Pass A's FIXED estimate: the header exactly, the codes by
+// estimate_rice_bits().
+//
+// Both sides deliberately share that estimate's bias. At k = 0 it assumes
+// half the residuals are negative, so a near-perfect predictor can win a
+// comparison it would lose exactly, by up to a few percent on synthetic
+// signals and a byte or two on real audio. Pricing only LPC exactly
+// made the output larger on average.
+FLAC_NOINLINE void lpc_price(LpcCandidate& candidate, uint64_t abs_sum, uint32_t n, uint32_t bps) {
+    const uint32_t count = n - candidate.predictor.order;
+    uint8_t k = 0;
+    const uint64_t codes = estimate_rice(abs_sum, count, k);
+    candidate.rice.order = 0;
+    candidate.rice.parameter_bits = static_cast<uint8_t>(rice_parameter_bits(k));
+    candidate.rice.k[0] = k;
+    candidate.estimated_bits = lpc_header_bits(candidate.predictor, bps) +
+                               RICE_PARTITION_ORDER_BITS + candidate.rice.parameter_bits + codes;
+}
+
+// Upper bound on the LPC subframe's size, as in fixed_subframe_bits_bound()
+FLAC_ALWAYS_INLINE uint64_t lpc_bound(const LpcCandidate& candidate, uint32_t n) {
+    return residual_bits_bound(candidate.estimated_bits, n, candidate.predictor.order);
+}
+
+// LPC subframe header (RFC 9639 SS9.2.6) through the first Rice parameter
+FLAC_NOINLINE void write_lpc_header(BitWriterLocal& bw, const LpcCandidate& candidate,
+                                    const int32_t* warmup, uint8_t bps8, uint32_t wasted) {
+    const LpcPredictor& predictor = candidate.predictor;
+    write_subframe_header(bw, static_cast<uint8_t>(SUBFRAME_TYPE_LPC_MIN + predictor.order - 1),
+                          wasted);
+    for (uint32_t i = 0; i < predictor.order; i++) {
+        write_uint(bw, static_cast<uint32_t>(warmup[i]), bps8);
+    }
+    write_uint(bw, predictor.precision - 1, LPC_PRECISION_BITS);
+    write_uint(bw, predictor.shift, LPC_SHIFT_BITS);
+    const uint8_t precision8 = static_cast<uint8_t>(predictor.precision);
+    for (uint32_t i = 0; i < predictor.order; i++) {
+        write_uint(bw, static_cast<uint32_t>(predictor.coefficients[i]), precision8);
+    }
+    write_coding_method(bw, candidate.rice.parameter_bits);
+    write_uint(bw, FLACEncoder::RICE_PARTITIONS_AVAILABLE ? candidate.rice.order : 0,
+               RICE_PARTITION_ORDER_BITS);
+    write_uint(bw, candidate.rice.k[0], candidate.rice.parameter_bits);
+}
+
+// Whether the signal's stream is deeper than 16 bits, which takes the wide
+// LPC path
+FLAC_ALWAYS_INLINE bool deep_stream(const PackedSignal& signal) {
+    return signal.bps > 16;
+}
+
+// Walk 2: price the designed predictor from its residual magnitudes, per
+// leaf partition when the subframe can split. Returns false as design_lpc()
+// does. Inlined so design_lpc()'s walks share one stack frame.
+FLAC_ALWAYS_INLINE bool price_lpc(const PackedSignal& signal, uint32_t bps,
+                                  const SubframeSettings& settings, LpcCandidate& candidate,
+                                  int32_t* work) {
+    const uint32_t n = signal.n;
+    const LpcPredictor& predictor = candidate.predictor;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- lpc_residual_begin() sets it
+    LpcResidualState state;
+    lpc_residual_begin(state);
+#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+    const uint32_t p = partition_order_limit(n, predictor.order, settings.max_partition_order);
+    if (p != 0) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- leaf_sums_begin() sets it
+        LeafSums sums;
+        leaf_sums_begin(sums, n, p, 0);
+        auto sum = [&](const int32_t* s, uint32_t m) {
+            lpc_sum_leaves(predictor, state, s, m, work, sums);
+        };
+        signal.residual_chunks<0>(sum);
+        if (!state.in_range) {
+            return false;
+        }
+        candidate.estimated_bits = lpc_header_bits(predictor, bps) +
+                                   choose_partitions(sums, n, predictor.order, p, candidate.rice);
+        return lpc_bound(candidate, n) < verbatim_subframe_bits(n, bps);
+    }
+#else
+    (void)settings;
+#endif
+    uint64_t abs_sum = 0;
+    auto sum = [&](const int32_t* s, uint32_t m) {
+        lpc_sum_chunk(predictor, state, s, m, work, abs_sum);
+    };
+    signal.residual_chunks<0>(sum);
+    if (!state.in_range) {
+        return false;
+    }
+    lpc_price(candidate, abs_sum, n, bps);
+    return lpc_bound(candidate, n) < verbatim_subframe_bits(n, bps);
+}
+
+// Walks 1 and 2: design and price the signal's LPC candidate. Returns false
+// when LPC cannot code it (a degenerate autocorrelation or a residual out of
+// range) or cannot be proven smaller than VERBATIM.
+FLAC_NOINLINE bool design_lpc(const PackedSignal& signal, uint32_t bps,
+                              const SubframeSettings& settings, LpcCandidate& candidate) {
+    const uint32_t n = signal.n;
+    if (n < 2) {
+        return false;  // No residual after the warmup
+    }
+    int32_t work[LPC_WORK_SAMPLES];
+
+    // Walk 1: the windowed autocorrelation and the design, scoped so walk 2
+    // can reuse its stack.
+    {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- set by its begin()
+        LpcAutocorrelation ac;
+        const uint32_t max_order = settings.lpc_max_order;
+        const uint32_t lags = (max_order < n) ? max_order : (n - 1);
+        if (deep_stream(signal)) {
+            lpc_autocorrelation_begin_wide(ac, n, lags, bps);
+        } else {
+            lpc_autocorrelation_begin(ac, n, lags, bps);
+        }
+        auto correlate = [&](const int32_t* s, uint32_t m) {
+            lpc_autocorrelation_update(ac, s, m, work);
+        };
+        signal.residual_chunks<0>(correlate);
+        if (!lpc_design(ac, bps, settings.lpc_precision, candidate.predictor)) {
+            return false;
+        }
+    }
+    return price_lpc(signal, bps, settings, candidate, work);
+}
+
+// Walk 3: write the LPC subframe design_lpc() designed
+FLAC_NOINLINE void write_lpc_subframe(BitWriterLocal& bw, const PackedSignal& signal, uint32_t bps,
+                                      const LpcCandidate& candidate) {
+    int32_t work[LPC_WORK_SAMPLES];
+    const LpcPredictor& predictor = candidate.predictor;
+    const bool capacity_proven =
+        capacity_for(bw, lpc_bound(candidate, signal.n) + signal.wasted_bits());
+    int32_t warmup[LPC_MAX_ORDER] = {};
+    for (uint32_t i = 0; i < predictor.order; i++) {
+        warmup[i] = signal.warmup_sample(i);
+    }
+    write_lpc_header(bw, candidate, warmup, static_cast<uint8_t>(bps), signal.wasted_bits());
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- lpc_residual_begin() sets it
+    LpcResidualState state;
+    lpc_residual_begin(state);
+#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+    if (candidate.rice.order != 0) {
+        RiceEmitter emitter =
+            rice_emitter(candidate.rice, signal.n, predictor.order, capacity_proven);
+        auto emit = [&](const int32_t* s, uint32_t m) {
+            lpc_emit_partitioned(bw, predictor, state, s, m, work, emitter);
+        };
+        signal.residual_chunks<0>(emit);
+        return;
+    }
+#endif
+    const uint8_t k = candidate.rice.k[0];
+    auto emit = [&](const int32_t* s, uint32_t m) {
+        lpc_emit_chunk(bw, predictor, state, s, m, work, k, capacity_proven);
+    };
+    signal.residual_chunks<0>(emit);
+}
+
+#endif  // MICRO_FLAC_ENCODER_DISABLE_LPC
+
+// Write one subframe at depth bps: CONSTANT, the cheaper of FIXED (at its
+// best partitioning) and LPC, or VERBATIM when FIXED cannot be proven
+// smaller. LPC is designed here when enabled.
 //
 // Out of line: encode_frame() calls it from three places.
 FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal, uint32_t bps,
@@ -1111,19 +1416,35 @@ FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal
         return;
     }
 
+    uint64_t fixed_bits = analysis.estimated_bits;
 #ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- order 0 reads nothing else
+    RicePartitions rice;
+    rice.order = 0;
     if (settings.max_partition_order != 0) {
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- partition_fixed() sets it
-        RicePartitions rice;
-        const uint64_t fixed_bits =
-            partition_fixed(signal, bps, analysis, settings.max_partition_order, rice);
-        if (rice.order != 0) {
-            write_partitioned_fixed(bw, signal, bps, analysis.order, rice, fixed_bits);
+        fixed_bits = partition_fixed(signal, bps, analysis, settings.max_partition_order, rice);
+    }
+#endif
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+    if (settings.lpc_max_order != 0) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- design_lpc() sets it
+        LpcCandidate candidate;
+        if (design_lpc(signal, bps, settings, candidate) && candidate.estimated_bits < fixed_bits) {
+            write_lpc_subframe(bw, signal, bps, candidate);
             return;
         }
     }
 #else
     (void)settings;
+    (void)fixed_bits;
+#endif
+
+#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
+    if (rice.order != 0) {
+        write_partitioned_fixed(bw, signal, bps, analysis.order, rice, fixed_bits);
+        return;
+    }
 #endif
 
     const uint64_t budget = fixed_subframe_budget(signal, bps, analysis);
@@ -1172,6 +1493,9 @@ FLAC_NOINLINE size_t close_frame(BitWriterLocal& bw, const uint8_t* frame_start)
 constexpr size_t FLACEncoder::HEADER_BYTES;
 constexpr uint32_t FLACEncoder::MIN_BLOCK_SIZE;
 constexpr uint32_t FLACEncoder::MAX_BLOCK_SIZE;
+constexpr uint8_t FLACEncoder::MAX_LPC_ORDER;
+constexpr bool FLACEncoder::LPC_AVAILABLE;
+constexpr uint8_t FLACEncoder::MAX_LPC_BITS_PER_SAMPLE;
 constexpr uint8_t FLACEncoder::MAX_RICE_PARTITION_ORDER;
 constexpr bool FLACEncoder::RICE_PARTITIONS_AVAILABLE;
 #endif
@@ -1355,6 +1679,8 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     this->sample_rate_extra_[0] = 0;
     this->sample_rate_extra_[1] = 0;
     this->sample_rate_extra_len_ = 0;
+    this->lpc_max_order_ = 0;
+    this->lpc_precision_ = 0;
     this->max_partition_order_ = 0;
 
     // Only validates and precomputes; config_result_ stays BAD_CONFIG unless
@@ -1372,6 +1698,9 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     if (block_size < MIN_BLOCK_SIZE || block_size > MAX_BLOCK_SIZE) {
         return;
     }
+    if (options.lpc && (options.max_lpc_order < 1 || options.max_lpc_order > MAX_LPC_ORDER)) {
+        return;
+    }
     if (options.max_rice_partition_order > MAX_RICE_PARTITION_ORDER) {
         return;
     }
@@ -1385,6 +1714,12 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     this->sample_rate_extra_[0] = rate.extra[0];
     this->sample_rate_extra_[1] = rate.extra[1];
     this->sample_rate_extra_len_ = rate.extra_len;
+#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
+    if (options.lpc) {
+        this->lpc_max_order_ = options.max_lpc_order;
+        this->lpc_precision_ = static_cast<uint8_t>(lpc_precision(bits_per_sample, block_size));
+    }
+#endif
 #ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
     this->max_partition_order_ = options.max_rice_partition_order;
 #endif
@@ -1496,7 +1831,8 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     // Each signal of this frame is `base` with its channel or candidate set
     const PackedSignal base{input, num_samples,    bps, bytes,     nch,
                             0,     SignalId::LEFT, a,   chunk_len, 0};
-    const SubframeSettings settings{this->max_partition_order_};
+    const SubframeSettings settings{this->lpc_max_order_, this->lpc_precision_,
+                                    this->max_partition_order_};
     const bool find_wasted = this->options_.wasted_bits;
 
     if (nch != 2) {

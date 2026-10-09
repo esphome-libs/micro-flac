@@ -84,12 +84,24 @@ struct FLACEncoderOptions {
     /// [FLACEncoder::MIN_BLOCK_SIZE, FLACEncoder::MAX_BLOCK_SIZE].
     uint32_t block_size{4096};
 
+    /// Also try linear prediction (LPC) on each subframe, keeping it where it
+    /// is estimated to code smaller than the fixed predictors. On 16-bit
+    /// music it makes the output about 7-9% smaller and encodes at under half
+    /// the speed. Validated, then ignored, in a build without LPC
+    /// (FLACEncoder::LPC_AVAILABLE).
+    bool lpc{false};
+
+    /// Highest LPC order tried, in [1, FLACEncoder::MAX_LPC_ORDER]. Higher
+    /// orders compress slightly better and encode slower. Validated whenever
+    /// `lpc` is set.
+    uint8_t max_lpc_order{8};
+
     /// Largest Rice partition order tried, in [0,
     /// FLACEncoder::MAX_RICE_PARTITION_ORDER]; 0 codes each subframe with one
     /// Rice parameter. Partitioning (RFC 9639 SS9.2.7) gives each of up to
     /// 2^order stretches of a subframe its own parameter. It pays off mostly
     /// at large blocks: order 6 makes music about 1% smaller at 4096 samples,
-    /// for about 19% more encode time on an ESP32-S3.
+    /// for about 19% more encode time on an ESP32-S3 (about 11% with LPC).
     uint8_t max_rice_partition_order{0};
 
     /// Code a subframe whose samples all end in the same k zero bits as
@@ -107,7 +119,7 @@ struct FLACEncoderOptions {
  *
  * Encodes packed PCM (see PcmFormat) to a native, fixed-blocksize FLAC
  * stream, one block per encode() call. Each subframe uses the cheapest fixed
- * predictor (orders 0-4).
+ * predictor (orders 0-4) or, with FLACEncoderOptions::lpc, linear prediction.
  * Stereo frames pick the cheapest of the four channel assignments.
  *
  * The encoder never buffers input: encode() consumes exactly one block
@@ -121,7 +133,7 @@ struct FLACEncoderOptions {
  *          thread.
  *
  * @note The encoder never allocates; its working memory is the object itself
- *       (about 2.1 KB), plus up to about 2.3 KB of task stack inside
+ *       (about 2.1 KB), plus up to about 3.4 KB of task stack inside
  *       encode() and finish(). The constructor always succeeds, and an
  *       unsupported configuration is reported by the first write_header(),
  *       encode() or finish() call as FLAC_ENCODER_ERROR_BAD_CONFIG. To
@@ -194,8 +206,31 @@ public:
     /// @brief Largest FLACEncoderOptions::block_size accepted (16-bit field)
     static constexpr uint32_t MAX_BLOCK_SIZE = 65535;
 
+    /// @brief Largest FLACEncoderOptions::max_lpc_order accepted
+    static constexpr uint8_t MAX_LPC_ORDER = 12;
+
     /// @brief Largest FLACEncoderOptions::max_rice_partition_order accepted
     static constexpr uint8_t MAX_RICE_PARTITION_ORDER = 6;
+
+    /// @brief Whether this build includes LPC
+    ///
+    /// Without it (MICRO_FLAC_ENCODER_DISABLE_LPC), the LPC options are
+    /// validated, then ignored.
+#ifdef MICRO_FLAC_ENCODER_DISABLE_LPC
+    static constexpr bool LPC_AVAILABLE = false;
+#else
+    static constexpr bool LPC_AVAILABLE = true;
+#endif
+
+    /// @brief Deepest stream FLACEncoderOptions::lpc applies to
+    ///
+    /// 24, or 0 without LPC. Streams deeper than 16 bits take 64-bit
+    /// arithmetic, which Xtensa builds from 32-bit halves.
+#ifdef MICRO_FLAC_ENCODER_DISABLE_LPC
+    static constexpr uint8_t MAX_LPC_BITS_PER_SAMPLE = 0;
+#else
+    static constexpr uint8_t MAX_LPC_BITS_PER_SAMPLE = 24;
+#endif
 
     /// @brief Whether this build includes Rice partitioning
     ///
@@ -449,6 +484,8 @@ private:
     uint8_t sample_rate_code_{0};           // Frame header sample-rate code
     uint8_t sample_rate_extra_[2]{};        // Its extra bytes, big-endian
     uint8_t sample_rate_extra_len_{0};      // 0, 1, or 2
+    uint8_t lpc_max_order_{0};              // Highest LPC order tried; 0 when LPC does not apply
+    uint8_t lpc_precision_{0};              // LPC coefficient precision to aim for
     uint8_t max_partition_order_{0};        // Largest Rice partition order tried; 0 when off
     bool finished_{false};                  // Whether finish() has ended this stream
     bool stereo_estimation_enabled_{true};  // false forces independent stereo; set only by

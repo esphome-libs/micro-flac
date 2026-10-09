@@ -108,6 +108,10 @@ else()
     endif()
 
     # Encoder features (default ON); each OFF compiles its code out
+    option(MICRO_FLAC_ENCODER_ENABLE_LPC "Enable encoder LPC (FLACEncoderOptions::lpc)" ON)
+    if(NOT MICRO_FLAC_ENCODER_ENABLE_LPC)
+        target_compile_definitions(micro_flac PUBLIC MICRO_FLAC_ENCODER_DISABLE_LPC)
+    endif()
     option(MICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS
            "Enable encoder Rice partitioning (FLACEncoderOptions::max_rice_partition_order)" ON)
     if(NOT MICRO_FLAC_ENCODER_ENABLE_RICE_PARTITIONS)
