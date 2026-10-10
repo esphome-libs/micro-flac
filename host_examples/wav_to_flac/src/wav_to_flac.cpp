@@ -321,8 +321,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     // WAV_8BIT_SIGN_FLIP).
     const PcmFormat format(wav_info.sample_rate, wav_info.num_channels, wav_info.bits_per_sample);
 
+    // read_wav_header() rejects a zero channel count or bit depth; the guard
+    // keeps the division visibly safe for static analysis
     const uint64_t bytes_per_frame = format.bytes_per_frame();
-    const uint64_t total_samples_per_channel = wav_info.data_size / bytes_per_frame;
+    const uint64_t total_samples_per_channel =
+        (bytes_per_frame > 0) ? wav_info.data_size / bytes_per_frame : 0;
     if (total_samples_per_channel == 0) {
         std::fprintf(stderr, "Error: '%s' contains no audio samples\n", args.input_file);
         std::fclose(wav_file);
