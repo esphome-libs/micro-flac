@@ -3,7 +3,7 @@
 [![CI](https://github.com/esphome-libs/micro-flac/actions/workflows/ci.yml/badge.svg)](https://github.com/esphome-libs/micro-flac/actions/workflows/ci.yml)
 [![Component Registry](https://components.espressif.com/components/esphome/micro-flac/badge.svg)](https://components.espressif.com/components/esphome/micro-flac)
 
-A FLAC (Free Lossless Audio Codec) decoder and encoder optimized for ESP32 embedded devices. The decoder supports both native FLAC and Ogg FLAC containers with automatic format detection; the encoder produces native FLAC from 4-24 bit PCM in 1-8 channels. Designed as an ESP-IDF component with PSRAM support and Xtensa assembly optimizations for ESP32/ESP32-S3.
+A FLAC (Free Lossless Audio Codec) decoder and encoder optimized for ESP32 embedded devices. The decoder supports both native FLAC and Ogg FLAC containers with automatic format detection; the encoder produces native FLAC from 4-32 bit PCM in 1-8 channels. Designed as an ESP-IDF component with PSRAM support and Xtensa assembly optimizations for ESP32/ESP32-S3.
 
 [![A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/ohf-project.png)](https://www.openhomefoundation.org/)
 
@@ -21,8 +21,8 @@ A FLAC (Free Lossless Audio Codec) decoder and encoder optimized for ESP32 embed
 
 ### Encoding
 
-- **4-24 bit PCM input, 1-8 channels**: Packed interleaved bytes in exactly the layout the decoder outputs (`PcmFormat`)
-- **Fixed predictors, plus opt-in LPC**: Fixed predictors (orders 0-4) always; linear prediction up to order 12 on request, typically 7-9% smaller on music. All integer arithmetic, so output is identical on every platform
+- **4-32 bit PCM input, 1-8 channels**: Packed interleaved bytes in exactly the layout the decoder outputs (`PcmFormat`)
+- **Fixed predictors, plus opt-in LPC**: Fixed predictors (orders 0-4) always; linear prediction up to order 12 on request (up to 24 bits), typically 7-9% smaller on music. All integer arithmetic, so output is identical on every platform
 - **Opt-in Rice partitioning and LPC stereo search**: With both and LPC order 8, output is within 0.01% of reference `flac -5`
 - **Stereo decorrelation**: Each frame takes the cheapest of the four channel assignments
 - **Wasted-bits detection**: 16-bit audio in a 24-bit stream codes nearly as small as a 16-bit stream
@@ -215,12 +215,12 @@ Available after `decode()` returns `FLAC_DECODER_HEADER_READY` via `decoder.get_
 
 ### Encoder Methods
 
-`FLACEncoder` encodes interleaved 4-24 bit PCM in 1-8 channels to native FLAC with a fixed block size: every frame but the last holds exactly `block_size` samples per channel. It is configured at construction, or later with `reset(format, options)`, from two structs:
+`FLACEncoder` encodes interleaved 4-32 bit PCM in 1-8 channels to native FLAC with a fixed block size: every frame but the last holds exactly `block_size` samples per channel. It is configured at construction, or later with `reset(format, options)`, from two structs:
 
-- **`PcmFormat`** (`micro_flac/pcm_format.h`) describes the input. Construct it as `PcmFormat{sample_rate, num_channels, bits_per_sample}` (1-1048575 Hz, 1-8 channels, 4-24 bits) and read it back through `sample_rate()`, `num_channels()`, `bits_per_sample()`, `bytes_per_sample()`, `bytes_per_frame()` and `is_valid()`, as in the other micro-* libraries. Samples are interleaved, little-endian, signed and `ceil(bits_per_sample() / 8)` bytes wide, with other depths left-justified (a 12-bit sample fills the top 12 bits of its 2 bytes). This is exactly what the decoder's `uint8_t*` `decode()` produces. 2-byte samples must be 2-byte aligned.
+- **`PcmFormat`** (`micro_flac/pcm_format.h`) describes the input. Construct it as `PcmFormat{sample_rate, num_channels, bits_per_sample}` (1-1048575 Hz, 1-8 channels, 4-32 bits) and read it back through `sample_rate()`, `num_channels()`, `bits_per_sample()`, `bytes_per_sample()`, `bytes_per_frame()` and `is_valid()`, as in the other micro-* libraries. Samples are interleaved, little-endian, signed and `ceil(bits_per_sample() / 8)` bytes wide, with other depths left-justified (a 12-bit sample fills the top 12 bits of its 2 bytes). This is exactly what the decoder's `uint8_t*` `decode()` produces. 2-byte samples must be 2-byte aligned; 4-byte samples need no alignment.
 - **`FLACEncoderOptions`** controls compression (see [Encoding Performance](#encoding-performance) for the costs):
   - `block_size` (16-65535, default 4096).
-  - `lpc` (default off): also try linear prediction on each subframe, keeping it where it is estimated smaller. Typically 7-9% smaller on 16-bit music. Streams of 17-24 bits use 64-bit arithmetic, much slower on an ESP32 (see [Encoding Performance](#encoding-performance)).
+  - `lpc` (default off): also try linear prediction on each subframe, keeping it where it is estimated smaller. Typically 7-9% smaller on 16-bit music. Streams of 17-24 bits use 64-bit arithmetic, much slower on an ESP32 (see [Encoding Performance](#encoding-performance)). Streams of 25-32 bits ignore it and use the fixed predictors only.
   - `max_lpc_order` (1-12, default 8): the highest LPC order tried. Orders 4, 8 and 12 come out about 6.8%, 8.6% and 9% smaller than the fixed predictors alone.
   - `lpc_stereo_search` (default off): with `lpc` on stereo, choose each frame's channel assignment after designing LPC for all four candidates (left, right, mid, side) rather than from the fixed predictors. 0.05-0.25% smaller.
   - `max_rice_partition_order` (0-6, default 0): split each subframe's residuals into up to 2^order partitions with their own Rice parameters. About 1% smaller at block size 4096, 0.3% at 1152.
@@ -299,6 +299,8 @@ Encoding the 30-second 48 kHz stereo clip on an ESP32-S3 at 240 MHz (`examples/e
 | `lpc`, order 12 | 8.1x realtime | n/a | -4.8% |
 | `lpc` order 8 + `lpc_stereo_search` | 6.5x realtime | n/a | -5.2% |
 | `lpc` order 8 + search + partitions | 6.0x realtime | n/a | -5.8% |
+
+At 32 bits (the clip's first 20 seconds widened with 16 bits of noise; fixed predictors only), the defaults encode at 3.8x realtime and with `max_rice_partition_order` 6 at 3.3x: 25-32 bit streams are analyzed in 64-bit arithmetic.
 
 On a typical music corpus LPC gains more (7-9%) than on this clip. A host encodes several times faster. LPC on 24-bit audio takes 64-bit arithmetic, which Xtensa builds from 32-bit halves, hence its lower speed.
 
@@ -407,7 +409,7 @@ Override `FLAC_MALLOC` and `FLAC_FREE` at compile time (`-DFLAC_MALLOC=my_custom
 
 - **No seeking support**: Decoder is designed for streaming, not random access
 - **No automatic MD5 validation**: The MD5 signature is extracted from STREAMINFO and accessible via `get_stream_info().md5_signature()`, but not automatically validated during decoding
-- **Encoder tops out at 24-bit**: Any depth outside 4-24 is `FLAC_ENCODER_ERROR_BAD_CONFIG`; 32-bit input would need a 64-bit residual path
+- **No LPC above 24 bits**: 25-32 bit streams use the fixed predictors only (`lpc` is ignored there). A fixed order whose residuals would reach 2^31, the limit RFC 9639 §9.2.7.3 sets, is never used; with none left, the subframe is VERBATIM. Full-scale 32-bit audio therefore compresses less than reference `flac`, whose LPC can still predict it
 - **Encoder uses a fixed block size**: Every frame but the last is `block_size` samples; there is no variable-blocksize mode
 - **Streamable subset is up to the caller**: Block sizes above 16384, or above 4608 at 48 kHz or below, bit depths other than 8/12/16/20/24, and sample rates no frame header code can carry (above 65535 Hz, other than multiples of 10 up to 655350 Hz and whole kHz up to 255 kHz; these are read from STREAMINFO) fall outside RFC 9639's streamable subset (§7), which a strict subset-only decoder may refuse. The defaults are within it
 - **Encoder writes no MD5 signature**: STREAMINFO's MD5 is left zeroed ("unknown"). The caller can hash the input and patch the digest into the finished header, as `wav_to_flac` does

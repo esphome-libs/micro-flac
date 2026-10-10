@@ -27,14 +27,14 @@
 ///    -fno-access-control (see CMakeLists.txt) so it can read and set
 ///    FLACEncoder's private members directly, which keeps test-only hooks out
 ///    of the public header.
-/// 3. Round-trip fidelity at bit depths a WAV file cannot carry. WAV stores
-///    only whole-byte sample widths, so depths like 12, 17 and 20 are
-///    unreachable through the CLI even though the format and this encoder
-///    both support them. These are encoded and decoded entirely in memory,
-///    and the decoder's byte output must equal the encoder's byte input.
+/// 3. Round-trip fidelity at depths test_flac_encoder.py's WAV sources leave
+///    out, like 12, 17 and 20 bits. These are encoded and decoded entirely in
+///    memory, and the decoder's byte output must equal the encoder's byte
+///    input.
 ///
-/// Bit-exactness at 8, 16 and 24 bits across the block-size and channel-count
-/// matrix is test_flac_encoder.py's job, not this file's.
+/// Bit-exactness at 8, 16, 24 and 32 bits across the block-size and
+/// channel-count matrix is test_flac_encoder.py's job, not this file's, and so
+/// is RFC 9639 SS9.2.7.3's residual limit, which a round trip cannot see.
 ///
 /// Build/run (from tests/encoder):
 ///   cmake -B build && cmake --build build
@@ -121,12 +121,16 @@ void check_config_validation() {
 
     const FLACEncoderOptions defaults = make_options(BLOCK);
 
-    check("bits_per_sample 25 (above max)", first_use(make_format(2, 25), defaults),
+    check("bits_per_sample 33 (above max)", first_use(make_format(2, 33), defaults),
           FLAC_ENCODER_ERROR_BAD_CONFIG);
     check("bits_per_sample 3 (below min)", first_use(make_format(2, 3), defaults),
           FLAC_ENCODER_ERROR_BAD_CONFIG);
     check("bits_per_sample 4 (min)", first_use(make_format(1, 4), defaults), FLAC_ENCODER_SUCCESS);
-    check("bits_per_sample 24 + 8 channels (max)", first_use(make_format(8, 24), defaults),
+    check("bits_per_sample 24 + 8 channels", first_use(make_format(8, 24), defaults),
+          FLAC_ENCODER_SUCCESS);
+    check("bits_per_sample 25 (4-byte samples)", first_use(make_format(2, 25), defaults),
+          FLAC_ENCODER_SUCCESS);
+    check("bits_per_sample 32 + 8 channels (max)", first_use(make_format(8, 32), defaults),
           FLAC_ENCODER_SUCCESS);
     check("16-bit stereo", first_use(make_format(2, 16), defaults), FLAC_ENCODER_SUCCESS);
     check("16-bit 3 channels", first_use(make_format(3, 16), defaults), FLAC_ENCODER_SUCCESS);
@@ -181,6 +185,8 @@ void check_config_validation() {
         check("lpc with max_lpc_order 12 (max)", first_use(make_format(2, 16), lpc),
               FLAC_ENCODER_SUCCESS);
         check("lpc on a 24-bit stream", first_use(make_format(2, 24), lpc), FLAC_ENCODER_SUCCESS);
+        check("lpc on a 32-bit stream (accepted, ignored)", first_use(make_format(2, 32), lpc),
+              FLAC_ENCODER_SUCCESS);
         lpc.lpc_stereo_search = true;
         check("lpc_stereo_search", first_use(make_format(2, 16), lpc), FLAC_ENCODER_SUCCESS);
         check("lpc_stereo_search on mono (accepted, ignored)", first_use(make_format(1, 16), lpc),
@@ -252,6 +258,8 @@ void check_no_allocation() {
     const FLACEncoderOptions options = make_options(BLOCK);
     check("6 channels", first_use(make_format(6, 16), options), FLAC_ENCODER_SUCCESS);
     check("24-bit stereo", first_use(make_format(2, 24), options), FLAC_ENCODER_SUCCESS);
+    check("32-bit stereo (33-bit side)", first_use(make_format(2, 32), options),
+          FLAC_ENCODER_SUCCESS);
     check("12-bit mono (left-justified, needs unpacking)", first_use(make_format(1, 12), options),
           FLAC_ENCODER_SUCCESS);
     check("8-bit mono (1-byte samples)", first_use(make_format(1, 8), options),
@@ -796,8 +804,9 @@ std::vector<uint8_t> make_stereo(uint32_t n, uint32_t bits, StereoCase which) {
 void check_stereo_modes() {
     std::printf("\nEvery stereo channel assignment is chosen and round-trips:\n");
 
-    // 8, 12/16 and 24 bits are the 1-, 2- and 3-byte unpacking, whose Pass B
-    // derives each assignment's signals from the packed input chunk by chunk.
+    // 8, 12/16, 24 and 25/32 bits are the 1- to 4-byte unpacking, whose
+    // Pass B derives each assignment's signals from the packed input chunk by
+    // chunk (32-bit stereo's side is 33 bits).
     struct Case {
         StereoCase which;
         uint8_t code;
@@ -810,7 +819,7 @@ void check_stereo_modes() {
         {StereoCase::INDEPENDENT, 1, "independent"},
     };
     const uint32_t frames = BLOCK * 3 + 7;
-    for (const uint32_t bits : {8U, 12U, 16U, 24U}) {
+    for (const uint32_t bits : {8U, 12U, 16U, 24U, 25U, 32U}) {
         for (const Case& c : CASES) {
             char label[96];
             std::snprintf(label, sizeof(label), "%u-bit %s", bits, c.name);
@@ -1047,7 +1056,7 @@ void check_odd_depth_round_trips() {
     // exercises the joint-stereo assignments, and 5 forces the independent
     // multichannel path.
     const int failures_before = failures;
-    for (uint32_t bits = 4; bits <= 24; bits++) {
+    for (uint32_t bits = 4; bits <= 32; bits++) {
         for (const uint32_t channels : {1U, 2U, 5U}) {
             char label[96];
             std::snprintf(label, sizeof(label), "%u-bit, %u channel%s", bits, channels,
@@ -1058,7 +1067,7 @@ void check_odd_depth_round_trips() {
             }
         }
     }
-    std::printf("  depths 4-24 x {1, 2, 5} channels: %s\n",
+    std::printf("  depths 4-32 x {1, 2, 5} channels: %s\n",
                 failures == failures_before ? "all bit-exact" : "see failures above");
 
     // Large blocks, past every internal chunk size (Pass A's spill interval,
@@ -1066,7 +1075,7 @@ void check_odd_depth_round_trips() {
     // channel's extra bit, and the multichannel path.
     const int deep_failures_before = failures;
     constexpr uint32_t DEEP_BLOCK = 16384;
-    for (const uint32_t bits : {8U, 16U, 17U, 24U}) {
+    for (const uint32_t bits : {8U, 16U, 17U, 24U, 25U, 32U}) {
         for (const uint32_t channels : {1U, 2U, 5U}) {
             char label[96];
             std::snprintf(label, sizeof(label), "%u-bit, %u channel%s, %u-sample blocks", bits,
@@ -1077,7 +1086,7 @@ void check_odd_depth_round_trips() {
             }
         }
     }
-    std::printf("  depths {8, 16, 17, 24} x {1, 2, 5} channels at %u-sample blocks: %s\n",
+    std::printf("  depths {8, 16, 17, 24, 25, 32} x {1, 2, 5} channels at %u-sample blocks: %s\n",
                 DEEP_BLOCK,
                 failures == deep_failures_before ? "all bit-exact" : "see failures above");
 
@@ -1091,10 +1100,11 @@ void check_odd_depth_round_trips() {
     // (every block after the first for 24-bit mono, alternate blocks for
     // 24-bit stereo), which sends 24-bit input down the byte-load fallback
     // of the word-at-a-time unpacking; aligned starts take the word path.
+    // 32-bit input needs no alignment.
     const int chunk_failures_before = failures;
     const uint32_t chunk = FLACEncoder::CHUNK_SAMPLES;
     for (const uint32_t block : {chunk - 1, chunk, chunk + 1, (2 * chunk) - 1, (2 * chunk) + 1}) {
-        for (const uint32_t bits : {12U, 16U, 24U}) {
+        for (const uint32_t bits : {12U, 16U, 24U, 32U}) {
             for (const uint32_t channels : {1U, 2U, 5U}) {
                 char label[96];
                 std::snprintf(label, sizeof(label), "%u-bit, %u channel%s, %u-sample blocks", bits,
@@ -1106,8 +1116,9 @@ void check_odd_depth_round_trips() {
             }
         }
     }
-    std::printf("  {12, 16, 24}-bit x {1, 2, 5} channels at blocks around %u-sample chunks: %s\n",
-                chunk, failures == chunk_failures_before ? "all bit-exact" : "see failures above");
+    std::printf(
+        "  {12, 16, 24, 32}-bit x {1, 2, 5} channels at blocks around %u-sample chunks: %s\n",
+        chunk, failures == chunk_failures_before ? "all bit-exact" : "see failures above");
 }
 
 // Full-scale alternation on every sample: the input that drives Pass A's
@@ -1118,11 +1129,14 @@ void check_odd_depth_round_trips() {
 // bytes, so the round trip alone cannot catch one; this build defines
 // MICRO_FLAC_CHECK_SCAN_SUMS (CMakeLists.txt), which makes the encoder trap
 // on any partial past 32 bits, and this is the input that reaches the limit.
+// Past 24 bits the same input breaks the 2^31 residual limit at the higher
+// orders, and at 32 bits at every order (its floor is INT32_MIN), which
+// Pass A must avoid.
 void check_scan_worst_case() {
     std::printf("\nPass A spill interval at full-scale alternation\n");
     const int failures_before = failures;
     const uint32_t total_frames = BLOCK * 2 + 7;
-    for (const uint32_t bits : {16U, 20U, 22U, 23U, 24U}) {
+    for (const uint32_t bits : {16U, 20U, 22U, 23U, 24U, 25U, 28U, 29U, 31U, 32U}) {
         const int32_t peak = static_cast<int32_t>((1U << (bits - 1)) - 1U);
         const int32_t floor_value = -peak - 1;
         const uint32_t bytes = (bits + 7) / 8;
@@ -1151,7 +1165,7 @@ void check_scan_worst_case() {
             }
         }
     }
-    std::printf("  {16, 20, 22, 23, 24}-bit x {1, 2, 3} channels: %s\n",
+    std::printf("  {16, 20, 22, 23, 24, 25, 28, 29, 31, 32}-bit x {1, 2, 3} channels: %s\n",
                 failures == failures_before ? "all bit-exact" : "see failures above");
 }
 
@@ -1295,9 +1309,10 @@ void check_lpc() {
         }
     }
 
-    // Streams deeper than this build's LPC reaches ignore the option:
-    // byte-identical output. (Only in a build without LPC.)
-    for (const uint32_t bits : {17U, 20U, 24U}) {
+    // Streams deeper than this build's LPC reaches ignore the option, stereo
+    // search included: byte-identical output. (17-24 bits only in a build
+    // without LPC; 25-32 bits in every build.)
+    for (const uint32_t bits : {17U, 20U, 24U, 25U, 28U, 32U}) {
         if (!beyond_lpc_depth(bits)) {
             continue;
         }
@@ -1305,8 +1320,10 @@ void check_lpc() {
         const std::vector<uint8_t> tonal = make_tonal(frames, 2, bits);
         std::vector<uint8_t> off;
         std::vector<uint8_t> on;
+        FLACEncoderOptions search = make_lpc_options(BLOCK, 12);
+        search.lpc_stereo_search = true;
         encoded_size(make_format(2, bits), make_options(BLOCK), tonal, &off);
-        encoded_size(make_format(2, bits), make_lpc_options(BLOCK, 12), tonal, &on);
+        encoded_size(make_format(2, bits), search, tonal, &on);
         char label[96];
         std::snprintf(label, sizeof(label), "%u-bit stereo: output unchanged by lpc", bits);
         check_true(label, !off.empty() && off == on);
@@ -1618,9 +1635,10 @@ void check_partitions() {
     // Round trips at order 6 at every depth, with and without LPC, at block
     // sizes that allow up to 2 (16, with an order-4 predictor), 8 (1000 =
     // 8 * 125) and 64 (192 with a predictor of order 2 or less; 4096)
-    // partitions; the 7-sample final frame cannot be split at all.
+    // partitions; the 7-sample final frame cannot be split at all. Past 25
+    // bits a subframe's leaf sums take 64 bits.
     const int failures_before = failures;
-    for (const uint32_t bits : {4U, 8U, 12U, 16U, 20U, 24U}) {
+    for (const uint32_t bits : {4U, 8U, 12U, 16U, 20U, 24U, 28U, 32U}) {
         for (const uint32_t channels : {1U, 2U, 5U}) {
             for (const uint32_t lpc_order : {0U, 12U}) {
                 for (const uint32_t block : {16U, 192U, 1000U, 4096U}) {
@@ -1649,13 +1667,13 @@ void check_partitions() {
             }
         }
     }
-    std::printf("  {4-24}-bit x {1, 2, 5} ch x lpc {off, 12} x 4 block sizes: %s\n",
+    std::printf("  {4-32}-bit x {1, 2, 5} ch x lpc {off, 12} x 4 block sizes: %s\n",
                 failures == failures_before ? "all bit-exact" : "see failures above");
 
     // It has to pay off on bursty input, with fixed predictors, LPC, and the
     // stereo search; a build without partitioning must instead ignore the
     // option, byte for byte.
-    for (const uint32_t bits : {12U, 16U, 24U}) {
+    for (const uint32_t bits : {12U, 16U, 24U, 32U}) {
         for (const uint32_t channels : {1U, 2U, 5U}) {
             const uint32_t frames = BLOCK * 3;
             const std::vector<uint8_t> bursty = make_bursty(frames, channels, bits);
@@ -1792,8 +1810,8 @@ void check_wasted_bits() {
         uint32_t channels;
         uint32_t bits;
     };
-    const Format formats[] = {{1, 24}, {2, 24}, {2, 20}, {2, 17}, {1, 17},
-                              {2, 12}, {2, 8},  {5, 24}, {2, 16}, {1, 16}};
+    const Format formats[] = {{1, 24}, {2, 24}, {2, 20}, {2, 17}, {1, 17}, {2, 12}, {2, 8},
+                              {5, 24}, {2, 16}, {1, 16}, {2, 32}, {1, 32}, {2, 28}};
     const uint32_t mixed[8] = {8, 3, 0, 5, 1, 7, 2, 6};
     const int failures_before = failures;
     uint32_t cases = 0;
@@ -1836,7 +1854,7 @@ void check_wasted_bits() {
         }
     }
     std::printf(
-        "  %u round trips (10 formats x 5 wasted-bit shapes x 2 block sizes x 6 options): %s\n",
+        "  %u round trips (13 formats x 5 wasted-bit shapes x 2 block sizes x 6 options): %s\n",
         cases, failures == failures_before ? "all bit-exact" : "see failures above");
 
     // 16-bit audio finds its wasted bits like every other depth. 8-bit audio
@@ -1929,17 +1947,17 @@ void check_wasted_bits() {
     check("  formats whose output changes without wasted bits", identical_failures, 0);
 }
 
-// 3-byte samples at a misaligned address, ending exactly where their heap
-// allocation does: on hosts that unpack a 24-bit sample with one unaligned
-// 4-byte load (FLAC_FAST_UNALIGNED_LOADS), no load may read past the
-// caller's input, which ASan would report here. The misalignment keeps mono
-// and stereo off their aligned word paths, the odd block sizes put partial
-// chunks everywhere, and finish() gets a short final block that ends the
-// buffer too.
+// 3- and 4-byte samples at a misaligned address, ending exactly where their
+// heap allocation does: on hosts that unpack a 24-bit sample with one
+// unaligned 4-byte load (FLAC_FAST_UNALIGNED_LOADS), no load may read past
+// the caller's input, which ASan would report here. The misalignment keeps
+// mono and stereo off their aligned word paths, the odd block sizes put
+// partial chunks everywhere, and finish() gets a short final block that ends
+// the buffer too.
 void check_unaligned_input_end() {
-    std::printf("\n3-byte input misaligned and ending at its allocation's end:\n");
+    std::printf("\n3- and 4-byte input misaligned and ending at its allocation's end:\n");
     const int failures_before = failures;
-    for (const uint32_t bits : {17U, 24U}) {
+    for (const uint32_t bits : {17U, 24U, 25U, 32U}) {
         for (const uint32_t channels : {1U, 2U, 3U, 8U}) {
             for (const uint32_t block : {16U, 17U, 257U}) {
                 for (const uint32_t lpc_order : {0U, 12U}) {
@@ -1978,8 +1996,9 @@ void check_unaligned_input_end() {
             }
         }
     }
-    std::printf("  {17, 24}-bit x {1, 2, 3, 8} ch x blocks {16, 17, 257} x lpc {off, 12}: %s\n",
-                failures == failures_before ? "all bit-exact" : "see failures above");
+    std::printf(
+        "  {17, 24, 25, 32}-bit x {1, 2, 3, 8} ch x blocks {16, 17, 257} x lpc {off, 12}: %s\n",
+        failures == failures_before ? "all bit-exact" : "see failures above");
 }
 
 }  // namespace

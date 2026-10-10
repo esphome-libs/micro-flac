@@ -1,6 +1,6 @@
 # microFLAC - Claude Development Guide
 
-FLAC audio decoder and encoder library optimized for ESP32 embedded devices. The decoder supports both native FLAC and Ogg FLAC containers with automatic format detection; the encoder produces native FLAC from 4-24 bit PCM in 1-8 channels.
+FLAC audio decoder and encoder library optimized for ESP32 embedded devices. The decoder supports both native FLAC and Ogg FLAC containers with automatic format detection; the encoder produces native FLAC from 4-32 bit PCM in 1-8 channels.
 
 See `README.md` for full API docs, configuration options, and performance details.
 See `src/README.md` for internal architecture, decoder/encoder pipelines, and LPC optimization details.
@@ -68,7 +68,7 @@ cmake -B build && cmake --build build
 python3 test_flac_encoder.py                            # Encoder round-trip/reference test suite
 python3 test_flac_encoder.py --block-sizes 16,192,4096   # Custom block sizes
 python3 test_flac_encoder.py --skip-real-audio           # Synthetic sources only, no test corpus decode
-python3 test_flac_encoder.py --skip-depth-channel        # Skip the 8/24-bit and 3-8 channel matrix
+python3 test_flac_encoder.py --skip-depth-channel        # Skip the 8/24/25-32-bit and 3-8 channel matrix
 python3 test_flac_encoder.py --skip-lpc --skip-partitions  # Skip the LPC and Rice partitioning passes
 ```
 
@@ -173,4 +173,6 @@ python3 test_flac_encoder.py --skip-lpc --skip-partitions  # Skip the LPC and Ri
 - **Stereo search's stack and the plain LPC path**: `price_lpc()` stays inlined into `design_lpc()`; out of line, its sums stack on top of walk 1's frame (+720 B on every ESP32 LPC encode). The search's walk 1 (`design_stereo()`) stays out of line for the same reason. Check `-fstack-usage` and the Xtensa disassembly of `lpc_autocorrelation_update()`/`design_lpc()` after touching either
 - **Wasted bits stay outside the size estimates**: a subframe's unary wasted-bits count is the same for every coding of its signal, so every estimate and bound omits it and only the capacity checks (`capacity_for(bw, bound + signal.wasted_bits())`) add it. Pass A's analysis is rescaled from the unshifted scan (`finish_wasted_analysis()`), never rescanned
 - **Encoder hot path**: the scan, cascade, unpack and Rice loops are tuned against Xtensa's 14 usable registers. After touching `scan_range()`, `write_subframe()`, the cascade primitives, `PackedSignal::unpack()` or the unpack loops in `pcm_packing.cpp`, diff the Xtensa disassembly of those functions before and after: a hot loop must not gain stack references or instructions. Frame setup (`start_frame()`, `finish_frame()`, `close_frame()`) and `write_subframe()` stay out of line. Xtensa's `l32i` reaches only 1020 bytes past its base: a stack frame that grows beyond that, or an object field placed after the 2 KB `chunk_` (hence its place in `FLACEncoder`'s member order), costs an extra instruction per access
+- **Encoder 25-32 bit streams**: Pass A runs in 64 bits in `encode_frame64()` (`scan64()`), which also keeps only fixed orders whose residuals stay below 2^31 (RFC 9639 §9.2.7.3), else VERBATIM; Pass B is shared and stays 32-bit (a wrapping cascade). No LPC above 24 bits. Round trips cannot catch a residual-limit breach (decoders wrap), so `test_flac_encoder.py` recomputes residuals for sources deeper than 24 bits
+- **Keep rarely-run code out of the hot text**: code the 16/24-bit path never runs goes in `FLAC_COLD_SECTION` (compiler.h). Emitted among the hot functions, the 64-bit Pass A cost 16/24-bit encodes 0.2-0.6% on the ESP32-S3 with identical hot loops (instruction-cache placement). Not `__attribute__((cold))`, which also optimizes for size. 4-byte unpacking likewise lives in separate `unpack_*32()` functions: even a compile-time-dead branch in the shared 1-3 byte templates rescheduled their loops
 - **Encoder output must not change by accident**: refactors should produce byte-identical output in all four switch builds; hash a set of encodes before and after

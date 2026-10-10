@@ -21,6 +21,7 @@
 #include "frame_header.h"
 #include "lpc_analysis.h"
 #include "pcm_packing.h"
+#include "wrapping_arithmetic.h"
 
 #include <cstdint>
 #include <cstring>
@@ -48,17 +49,20 @@ static_assert(FLACEncoder::HEADER_BYTES == sizeof(MAGIC_BYTES) + 4 + STREAMINFO_
               "FLACEncoder::HEADER_BYTES must match the header write_header() emits");
 
 // Deepest supported stream (the shallowest is the format's, MIN_BITS_PER_SAMPLE).
-// 24 keeps every fixed residual in int32_t: an order-o residual is bounded by
+constexpr uint32_t MAX_BITS_PER_SAMPLE = 32;
+
+// Deepest stream Pass A scans in 32 bits: an order-o residual is bounded by
 // 2^(bps + o - 1), so the widest subframe, 24-bit stereo's 25-bit side at
-// order 4, stays below 2^28 and its zigzag below 2^29.
-constexpr uint32_t MAX_BITS_PER_SAMPLE = 24;
+// order 4, stays below 2^28 and its zigzag below 2^29. Deeper streams take
+// scan64().
+constexpr uint32_t MAX_SCAN32_BITS_PER_SAMPLE = 24;
 
 #ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
-// LPC applies to every supported depth: the deepest stream's side subframe
-// must fit LPC_MAX_SUBFRAME_BPS (lpc_analysis.h).
-static_assert(LPC_MAX_SUBFRAME_BPS == MAX_BITS_PER_SAMPLE + 1,
-              "LPC must cover the deepest stream's side subframe");
-static_assert(FLACEncoder::MAX_LPC_BITS_PER_SAMPLE == MAX_BITS_PER_SAMPLE,
+// LPC applies to every depth Pass A scans in 32 bits: the deepest such
+// stream's side subframe must fit LPC_MAX_SUBFRAME_BPS (lpc_analysis.h).
+static_assert(LPC_MAX_SUBFRAME_BPS == MAX_SCAN32_BITS_PER_SAMPLE + 1,
+              "LPC must cover the deepest 32-bit-scanned stream's side subframe");
+static_assert(FLACEncoder::MAX_LPC_BITS_PER_SAMPLE == MAX_SCAN32_BITS_PER_SAMPLE,
               "the public LPC depth limit must match the encoder's");
 #endif
 static_assert(FLACEncoder::MAX_LPC_ORDER == LPC_MAX_ORDER,
@@ -288,10 +292,11 @@ FLAC_NOINLINE void left_right_to_mid_side_or(int32_t* left_to_mid, int32_t* righ
 struct ChannelAnalysis {
     uint64_t estimated_bits{0};  // Estimated subframe size, capped at VERBATIM's
                                  // (see fixed_subframe_bits_bound())
-    int32_t constant_value{0};
     bool is_constant{false};
-    uint8_t order{0};  // Fixed-predictor order (0-4), unless is_constant
-    uint8_t k{0};      // Rice parameter for `order`
+    bool verbatim{false};  // No fixed order keeps RFC 9639 SS9.2.7.3's residual
+                           // limit (25-32 bit streams only)
+    uint8_t order{0};      // Fixed-predictor order (0-4), unless is_constant or verbatim
+    uint8_t k{0};          // Rice parameter for `order`
 };
 
 // |v| as uint32, defined for INT32_MIN. Written as a compare-and-select
@@ -313,7 +318,6 @@ FLAC_ALWAYS_INLINE uint32_t abs_u32(int32_t v) {
 struct SignalScan {
     uint64_t sum[MAX_FIXED_ORDER + 1];
     int32_t prev[MAX_FIXED_ORDER];
-    int32_t first;  // Sample 0, a CONSTANT subframe's value
 };
 
 // Samples before every order has a residual (order o's first is at i == o)
@@ -350,7 +354,6 @@ FLAC_ALWAYS_INLINE void scan_begin(SignalScan& scan, const int32_t* samples, uin
     for (uint32_t o = 0; o < MAX_FIXED_ORDER; o++) {
         scan.prev[o] = prev[o];
     }
-    scan.first = (warmup != 0) ? samples[0] : 0;
 }
 
 // Most samples whose uint32_t partial sums cannot overflow at subframe depth
@@ -435,18 +438,22 @@ FLAC_ALWAYS_INLINE void scan_range(SignalScan& scan, const int32_t* samples, uin
     scan.prev[3] = prev_e3;
 }
 
+// Every fixed order, as finish_analysis()'s `orders` mask
+constexpr uint32_t ALL_FIXED_ORDERS = (1U << (MAX_FIXED_ORDER + 1)) - 1;
+
 // Pick the fixed-predictor order and Rice parameter with the lowest
-// estimated size from a finished scan, at subframe depth bps (one more than
-// the stream's for a side signal). Out of line: it runs once per signal,
-// off the hot path.
-FLAC_NOINLINE ChannelAnalysis finish_analysis(const SignalScan& scan, uint32_t n, uint32_t bps) {
+// estimated size from a finished scan's sums, at subframe depth bps (one
+// more than the stream's for a side signal), among the orders set in
+// `orders`; with none, VERBATIM. Out of line: it runs once per signal, off
+// the hot path.
+FLAC_NOINLINE ChannelAnalysis finish_analysis(const uint64_t (&sums)[MAX_FIXED_ORDER + 1],
+                                              uint32_t n, uint32_t bps, uint32_t orders) {
     ChannelAnalysis result{};
 
     // Every first difference was zero <=> every sample equals the first.
-    const bool constant = (scan.sum[1] == 0);
+    const bool constant = (sums[1] == 0);
 
     result.is_constant = constant;
-    result.constant_value = scan.first;
     if (constant) {
         result.estimated_bits = SUBFRAME_HEADER_BITS + bps;
         return result;
@@ -460,8 +467,11 @@ FLAC_NOINLINE ChannelAnalysis finish_analysis(const SignalScan& scan, uint32_t n
     uint8_t best_k = 0;
 
     for (uint8_t order = 0; order <= max_order; order++) {
+        if (((orders >> order) & 1U) == 0) {
+            continue;
+        }
         const uint32_t residual_count = n - order;
-        const uint64_t sum = scan.sum[order];
+        const uint64_t sum = sums[order];
         // Subframe header, warmup samples, residual header (method, partition
         // order, a 4-bit parameter), then the codes. A 5-bit parameter's
         // extra bit is added once, for the chosen order, below; per order it
@@ -480,8 +490,13 @@ FLAC_NOINLINE ChannelAnalysis finish_analysis(const SignalScan& scan, uint32_t n
     // Pass B never writes more than VERBATIM, so the estimate is capped there
     // too, or the stereo plan would overprice noise-like candidates. A capped
     // estimate sends Pass B down fixed_subframe_budget()'s exact path.
-    best_bits += rice_parameter_bits(best_k) - RICE_PARAMETER_BITS;
     const uint64_t verbatim_bits = verbatim_subframe_bits(n, bps);
+    if (FLAC_UNLIKELY(best_bits == UINT64_MAX)) {
+        result.verbatim = true;
+        result.estimated_bits = verbatim_bits;
+        return result;
+    }
+    best_bits += rice_parameter_bits(best_k) - RICE_PARAMETER_BITS;
     result.order = best_order;
     result.k = best_k;
     result.estimated_bits = (best_bits < verbatim_bits) ? best_bits : verbatim_bits;
@@ -519,7 +534,80 @@ FLAC_NOINLINE ChannelAnalysis finish_wasted_analysis(SignalScan scan, uint32_t n
             sum >>= wasted;
         }
     }
-    return finish_analysis(scan, n, bps - wasted);
+    return finish_analysis(scan.sum, n, bps - wasted, ALL_FIXED_ORDERS);
+}
+
+// ============================================================================
+// Pass A in 64 bits, for streams deeper than MAX_SCAN32_BITS_PER_SAMPLE
+// ============================================================================
+//
+// Their residuals outgrow scan_range()'s 32 bits (32-bit stereo's side
+// reaches 2^36 at order 4), and a Rice-coded residual must stay below 2^31
+// (RFC 9639 SS9.2.7.3). scan64() also ORs each order's magnitudes: the OR is
+// below 2^31 exactly when every magnitude is, and shifts out wasted bits with
+// them. Pass B stays in 32 bits (see cascade_step()).
+
+// scan_range()'s state, in 64 bits, with each order's magnitudes ORed
+struct Scan64 {
+    uint64_t sum[MAX_FIXED_ORDER + 1];
+    uint64_t magnitude_or[MAX_FIXED_ORDER + 1];
+    int64_t prev[MAX_FIXED_ORDER];
+    uint32_t bits;   // The samples' low 32 bits ORed, for their wasted bits
+    uint32_t count;  // Samples scanned so far
+};
+
+// Continue a 64-bit scan over m samples, sample(i) giving each
+template <typename Sample>
+FLAC_COLD_SECTION FLAC_NOINLINE void scan64(Scan64& scan, uint32_t m, Sample sample) {
+    Scan64 s = scan;  // A copy the loops can keep in registers
+    // Add sample i's residuals of orders up to `orders`
+    const auto step = [&](uint32_t i, uint32_t orders) {
+        const int64_t s0 = sample(i);
+        const int64_t e[MAX_FIXED_ORDER + 1] = {s0, s0 - s.prev[0], s0 - s.prev[0] - s.prev[1],
+                                                s0 - s.prev[0] - s.prev[1] - s.prev[2],
+                                                s0 - s.prev[0] - s.prev[1] - s.prev[2] - s.prev[3]};
+        for (uint32_t o = 0; o <= orders; o++) {
+            const uint64_t magnitude =
+                (e[o] < 0) ? (0U - static_cast<uint64_t>(e[o])) : static_cast<uint64_t>(e[o]);
+            s.sum[o] += magnitude;
+            s.magnitude_or[o] |= magnitude;
+        }
+        s.bits |= static_cast<uint32_t>(static_cast<uint64_t>(s0));
+        s.prev[3] = e[3];
+        s.prev[2] = e[2];
+        s.prev[1] = e[1];
+        s.prev[0] = s0;
+    };
+    // Order o's first residual is at sample o
+    uint32_t i = 0;
+    for (; i < m && s.count + i < MAX_FIXED_ORDER; i++) {
+        step(i, s.count + i);
+    }
+    for (; i < m; i++) {
+        step(i, MAX_FIXED_ORDER);
+    }
+    s.count += m;
+    scan = s;
+}
+
+// finish_wasted_analysis() for a 64-bit scan, among the orders whose
+// residuals stay below 2^31
+FLAC_COLD_SECTION FLAC_NOINLINE ChannelAnalysis finish_analysis64(const Scan64& scan, uint32_t n,
+                                                                  uint32_t bps, bool find_wasted,
+                                                                  uint32_t& wasted) {
+    uint64_t sums[MAX_FIXED_ORDER + 1];
+    wasted = 0;
+    if (find_wasted && scan.bits != 0 && scan.sum[1] != 0) {
+        wasted = static_cast<uint32_t>(__builtin_ctz(scan.bits));
+    }
+    uint32_t orders = 0;
+    for (uint32_t o = 0; o <= MAX_FIXED_ORDER; o++) {
+        sums[o] = scan.sum[o] >> wasted;
+        if ((scan.magnitude_or[o] >> wasted) < (static_cast<uint64_t>(1) << 31)) {
+            orders |= 1U << o;
+        }
+    }
+    return finish_analysis(sums, n, bps - wasted, orders);
 }
 
 // ============================================================================
@@ -611,13 +699,15 @@ struct Cascade {
 };
 
 // Consume sample s0 and return its order-ORDER residual. The levels above
-// ORDER are dead, so this folds to ORDER subtractions.
+// ORDER are dead, so this folds to ORDER subtractions. They wrap: past 24
+// bits the lower orders may overflow (and a 33-bit side arrives wrapped), but
+// the residual comes out exact, since Pass A picks only orders that fit.
 template <uint8_t ORDER>
 FLAC_ALWAYS_INLINE int32_t cascade_step(int32_t s0, Cascade& c) {
-    const int32_t e1 = s0 - c.prev_s;
-    const int32_t e2 = e1 - c.prev_e1;
-    const int32_t e3 = e2 - c.prev_e2;
-    const int32_t e4 = e3 - c.prev_e3;
+    const int32_t e1 = wsub32(s0, c.prev_s);
+    const int32_t e2 = wsub32(e1, c.prev_e1);
+    const int32_t e3 = wsub32(e2, c.prev_e2);
+    const int32_t e4 = wsub32(e3, c.prev_e3);
     c.prev_e3 = e3;
     c.prev_e2 = e2;
     c.prev_e1 = e1;
@@ -650,7 +740,7 @@ struct PackedSignal {
     const uint8_t* input;
     uint32_t n;
     uint32_t bps;    // The stream's depth, which the input is packed at
-    uint32_t bytes;  // Bytes per packed sample (1, 2 or 3)
+    uint32_t bytes;  // Bytes per packed sample (1-4)
     uint32_t num_channels;
     uint32_t channel;  // The channel read when num_channels != 2
     SignalId sig;      // The candidate derived when num_channels == 2
@@ -665,6 +755,9 @@ struct PackedSignal {
 
     // Unpack samples [start, start + m) into chunk_ and return them
     FLAC_NOINLINE int32_t* unpack(uint32_t start, uint32_t m) const {
+        if (FLAC_UNLIKELY(this->bytes == 4)) {
+            return this->unpack32(start, m);
+        }
         const size_t frame_bytes = static_cast<size_t>(this->bytes) * this->num_channels;
         const uint8_t* src = this->input + (start * frame_bytes);
         const uint32_t shift = this->wasted;
@@ -690,15 +783,35 @@ struct PackedSignal {
         }
     }
 
-    int32_t warmup_sample(uint32_t i) const {
+    // unpack() for 4-byte samples
+    FLAC_COLD_SECTION FLAC_NOINLINE int32_t* unpack32(uint32_t start, uint32_t m) const {
+        const size_t frame_bytes = static_cast<size_t>(4) * this->num_channels;
+        const uint8_t* src = this->input + (start * frame_bytes);
+        const uint32_t shift = this->wasted;
+        if (this->num_channels != 2) {
+            unpack_channel32(this->buf, src, m, this->channel, this->num_channels,
+                             this->bps - shift);
+        } else if (this->sig == SignalId::MID) {
+            unpack_mid32(this->buf, src, m, this->bps, shift);
+        } else if (this->sig == SignalId::SIDE) {
+            unpack_side32(this->buf, src, m, this->bps, shift);
+        } else {
+            const uint32_t ch = (this->sig == SignalId::RIGHT) ? 1 : 0;
+            unpack_channel32(this->buf, src, m, ch, 2, this->bps - shift);
+        }
+        return this->buf;
+    }
+
+    // Sample i, in 64 bits for a 33-bit side
+    int64_t warmup_sample(uint32_t i) const {
         const size_t frame_bytes = static_cast<size_t>(this->bytes) * this->num_channels;
         const uint8_t* frame = this->input + (i * frame_bytes);
         if (this->num_channels != 2) {
             return unpack_sample(frame + (static_cast<size_t>(this->bytes) * this->channel),
                                  this->bps - this->wasted, this->bytes);
         }
-        const int32_t l = unpack_sample(frame, this->bps, this->bytes);
-        const int32_t r = unpack_sample(frame + this->bytes, this->bps, this->bytes);
+        const int64_t l = unpack_sample(frame, this->bps, this->bytes);
+        const int64_t r = unpack_sample(frame + this->bytes, this->bps, this->bytes);
         switch (this->sig) {
             case SignalId::RIGHT:
                 return r >> this->wasted;
@@ -761,6 +874,54 @@ FLAC_ALWAYS_INLINE void for_each_residual_chunk(const PackedSignal& signal, uint
 }
 
 // ----------------------------------------------------------------------------
+// 64-bit Pass A, per frame
+// ----------------------------------------------------------------------------
+
+// 64-bit Pass A for one channel
+FLAC_COLD_SECTION FLAC_NOINLINE ChannelAnalysis analyze_channel64(const PackedSignal& signal,
+                                                                  bool find_wasted,
+                                                                  uint32_t& wasted) {
+    Scan64 scan{};
+    for (uint32_t start = 0; start < signal.n; start += signal.chunk_len) {
+        const uint32_t m =
+            (signal.n - start > signal.chunk_len) ? signal.chunk_len : (signal.n - start);
+        const int32_t* s = signal.unpack(start, m);
+        scan64(scan, m, [s](uint32_t i) { return static_cast<int64_t>(s[i]); });
+    }
+    return finish_analysis64(scan, signal.n, signal.bps, find_wasted, wasted);
+}
+
+// 64-bit Pass A for stereo: left and right, plus mid and side with
+// `estimate_stereo`. `analyses` and `wasted` are indexed by SignalId.
+FLAC_COLD_SECTION FLAC_NOINLINE void analyze_stereo64(const PackedSignal& base,
+                                                      bool estimate_stereo, bool find_wasted,
+                                                      ChannelAnalysis (&analyses)[4],
+                                                      uint32_t (&wasted)[4]) {
+    Scan64 scans[4] = {};
+    int32_t* const left = base.buf;
+    int32_t* const right = base.buf + base.chunk_len;
+    const size_t frame_bytes = static_cast<size_t>(base.bytes) * 2;
+    for (uint32_t start = 0; start < base.n; start += base.chunk_len) {
+        const uint32_t m = (base.n - start > base.chunk_len) ? base.chunk_len : (base.n - start);
+        unpack_stereo32(left, right, base.input + (start * frame_bytes), m, base.bps);
+        scan64(scans[0], m, [left](uint32_t i) { return static_cast<int64_t>(left[i]); });
+        scan64(scans[1], m, [right](uint32_t i) { return static_cast<int64_t>(right[i]); });
+        if (estimate_stereo) {
+            scan64(scans[2], m, [left, right](uint32_t i) {
+                return (static_cast<int64_t>(left[i]) + right[i]) >> 1;
+            });
+            scan64(scans[3], m,
+                   [left, right](uint32_t i) { return static_cast<int64_t>(left[i]) - right[i]; });
+        }
+    }
+    const uint32_t count = estimate_stereo ? 4 : 2;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t bps = (i == static_cast<uint32_t>(SignalId::SIDE)) ? base.bps + 1 : base.bps;
+        analyses[i] = finish_analysis64(scans[i], base.n, bps, find_wasted, wasted[i]);
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Pass B's size bound
 // ----------------------------------------------------------------------------
 //
@@ -787,8 +948,13 @@ FLAC_ALWAYS_INLINE uint64_t fixed_subframe_bits_bound(const ChannelAnalysis& ana
 
 // Exact size of the FIXED subframe, by another walk over its residuals. The
 // rare path behind fixed_subframe_bits_bound(), so it stays out of line.
+// A ChannelAnalysis::verbatim signal, estimated at VERBATIM's size, also
+// lands here and is priced out.
 FLAC_NOINLINE uint64_t fixed_subframe_exact_bits(const PackedSignal& signal, uint32_t bps,
                                                  const ChannelAnalysis& analysis) {
+    if (FLAC_UNLIKELY(analysis.verbatim)) {
+        return UINT64_MAX;
+    }
     const uint8_t k = analysis.k;
     uint64_t quotients = 0;
     for_each_residual_chunk(signal, analysis.order, [&](const int32_t* r, uint32_t m) {
@@ -848,10 +1014,43 @@ FLAC_ALWAYS_INLINE void write_subframe_header(BitWriterLocal& bw, uint8_t type, 
     }
 }
 
+// Write one sample bps8 (up to 33) bits deep
+FLAC_ALWAYS_INLINE void write_sample(BitWriterLocal& bw, int64_t sample, uint8_t bps8) {
+    const uint64_t bits = static_cast<uint64_t>(sample);
+    if (FLAC_UNLIKELY(bps8 > 32)) {
+        write_uint(bw, static_cast<uint32_t>(bits >> 32), static_cast<uint8_t>(bps8 - 32));
+        bps8 = 32;
+    }
+    write_uint(bw, static_cast<uint32_t>(bits), bps8);
+}
+
+// Write the first `order` samples, a FIXED subframe's warmup
+FLAC_NOINLINE void write_warmup(BitWriterLocal& bw, const PackedSignal& signal, uint32_t order,
+                                uint8_t bps8) {
+    for (uint32_t i = 0; i < order; i++) {
+        write_sample(bw, signal.warmup_sample(i), bps8);
+    }
+}
+
 // VERBATIM subframe: the header, then every sample
 FLAC_NOINLINE void write_verbatim_subframe(BitWriterLocal& bw, const PackedSignal& signal,
                                            uint8_t bps8) {
     write_subframe_header(bw, SUBFRAME_TYPE_VERBATIM, signal.wasted_bits());
+    if (FLAC_UNLIKELY(bps8 > 32)) {
+        // A 33-bit side, which unpack() wraps: derive it from left and right
+        int32_t* const left = signal.buf;
+        int32_t* const right = signal.buf + signal.chunk_len;
+        const size_t frame_bytes = static_cast<size_t>(signal.bytes) * 2;
+        for (uint32_t start = 0; start < signal.n; start += signal.chunk_len) {
+            const uint32_t m =
+                (signal.n - start > signal.chunk_len) ? signal.chunk_len : (signal.n - start);
+            unpack_stereo32(left, right, signal.input + (start * frame_bytes), m, signal.bps);
+            for (uint32_t i = 0; i < m; i++) {
+                write_sample(bw, static_cast<int64_t>(left[i]) - right[i], bps8);
+            }
+        }
+        return;
+    }
     auto sink = [&](const int32_t* s, uint32_t m) {
         for (uint32_t i = 0; i < m; i++) {
             write_uint(bw, static_cast<uint32_t>(s[i]), bps8);
@@ -860,15 +1059,22 @@ FLAC_NOINLINE void write_verbatim_subframe(BitWriterLocal& bw, const PackedSigna
     signal.residual_chunks<0>(sink);
 }
 
+// CONSTANT subframe: the header, then the first sample. Never with wasted
+// bits, which would save only what they cost. Out of line, keeping its
+// 64-bit read out of write_subframe().
+FLAC_NOINLINE void write_constant_subframe(BitWriterLocal& bw, const PackedSignal& signal,
+                                           uint8_t bps8) {
+    write_subframe_header(bw, SUBFRAME_TYPE_CONSTANT, 0);
+    write_sample(bw, signal.warmup_sample(0), bps8);
+}
+
 // FIXED subframe header (RFC 9639 SS9.2.5) through the first Rice parameter
 FLAC_ALWAYS_INLINE void write_fixed_header(BitWriterLocal& bw, const PackedSignal& signal,
                                            uint8_t bps8, uint8_t order, uint8_t partition_order,
                                            uint8_t k, uint32_t parameter_bits) {
     write_subframe_header(bw, static_cast<uint8_t>(SUBFRAME_TYPE_FIXED_MIN + order),
                           signal.wasted_bits());
-    for (uint32_t i = 0; i < order; i++) {
-        write_uint(bw, static_cast<uint32_t>(signal.warmup_sample(i)), bps8);
-    }
+    write_warmup(bw, signal, order, bps8);
     write_coding_method(bw, parameter_bits);
     write_uint(bw, partition_order, RICE_PARTITION_ORDER_BITS);
     write_uint(bw, k, static_cast<uint8_t>(parameter_bits));
@@ -1058,9 +1264,30 @@ struct ResidualSink {
     }
 };
 
+// add_leaf_residuals() in 64 bits, for subframes deeper than 25 bits, whose
+// residuals may reach 2^31 - 1
+FLAC_COLD_SECTION FLAC_NOINLINE void add_leaf_residuals64(LeafSums& sums, const int32_t* r,
+                                                          uint32_t m) {
+    while (m != 0) {
+        const uint32_t take = leaf_step(sums, m);
+        uint64_t sum = 0;
+        for (uint32_t j = 0; j < take; j++) {
+            sum += abs_u32(r[j]);
+        }
+        sums.sum[sums.index] += sum;
+        r += take;
+        m -= take;
+        sums.pos += take;
+    }
+}
+
 // Add the next m residuals to their leaves' sums, in uint32_t partials of at
 // most sum_chunk_samples(bps)
 FLAC_NOINLINE void add_leaf_residuals(LeafSums& sums, const int32_t* r, uint32_t m, uint32_t bps) {
+    if (FLAC_UNLIKELY(bps > MAX_SCAN32_BITS_PER_SAMPLE + 1)) {
+        add_leaf_residuals64(sums, r, m);
+        return;
+    }
     const uint32_t run_max = sum_chunk_samples(bps);
     while (m != 0) {
         uint32_t take = leaf_step(sums, m);
@@ -1098,8 +1325,8 @@ FLAC_NOINLINE uint64_t partition_fixed(const PackedSignal& signal, uint32_t bps,
     const uint32_t n = signal.n;
     const uint32_t order = analysis.order;
     const uint32_t p = partition_order_limit(n, order, max_order);
-    if (p == 0) {
-        return unpartitioned_fixed(analysis, rice);
+    if (p == 0 || FLAC_UNLIKELY(analysis.verbatim)) {
+        return unpartitioned_fixed(analysis, rice);  // VERBATIM: left to Pass B's bound
     }
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- leaf_sums_begin() sets it
     struct Context {
@@ -1379,7 +1606,8 @@ FLAC_NOINLINE void write_lpc_subframe(BitWriterLocal& bw, const PackedSignal& si
         capacity_for(bw, lpc_bound(candidate, signal.n) + signal.wasted_bits());
     int32_t warmup[LPC_MAX_ORDER] = {};
     for (uint32_t i = 0; i < predictor.order; i++) {
-        warmup[i] = signal.warmup_sample(i);
+        // Fits: LPC streams are at most MAX_LPC_BITS_PER_SAMPLE deep
+        warmup[i] = static_cast<int32_t>(signal.warmup_sample(i));
     }
     write_lpc_header(bw, candidate, warmup, static_cast<uint8_t>(bps), signal.wasted_bits());
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- lpc_residual_begin() sets it
@@ -1417,9 +1645,7 @@ FLAC_NOINLINE void write_subframe(BitWriterLocal& bw, const PackedSignal& signal
     const uint8_t bps8 = static_cast<uint8_t>(bps);
 
     if (analysis.is_constant) {
-        // Never with wasted bits, which would save only what they cost
-        write_subframe_header(bw, SUBFRAME_TYPE_CONSTANT, 0);
-        write_uint(bw, static_cast<uint32_t>(analysis.constant_value), bps8);
+        write_constant_subframe(bw, signal, bps8);
         return;
     }
 
@@ -1773,8 +1999,12 @@ FLACEncoderResult FLACEncoder::encode(const uint8_t* input, size_t input_len, ui
         return room;
     }
 
-    const FLACEncoderResult result = this->encode_frame(input, this->options_.block_size, output,
-                                                        output_size_bytes, bytes_written);
+    const FLACEncoderResult result =
+        FLAC_UNLIKELY(this->format_.bits_per_sample() > MAX_SCAN32_BITS_PER_SAMPLE)
+            ? this->encode_frame64(input, this->options_.block_size, output, output_size_bytes,
+                                   bytes_written)
+            : this->encode_frame(input, this->options_.block_size, output, output_size_bytes,
+                                 bytes_written);
     if (result == FLAC_ENCODER_SUCCESS) {
         bytes_consumed = this->input_block_bytes_;
     }
@@ -1802,7 +2032,9 @@ FLACEncoderResult FLACEncoder::finish(const uint8_t* input, size_t input_len, ui
         // The one frame that may be shorter than the block size (RFC 9639 SS9.1.1)
         const uint32_t num_samples = static_cast<uint32_t>(input_len / frame_bytes);
         const FLACEncoderResult result =
-            this->encode_frame(input, num_samples, output, output_size_bytes, bytes_written);
+            FLAC_UNLIKELY(this->format_.bits_per_sample() > MAX_SCAN32_BITS_PER_SAMPLE)
+                ? this->encode_frame64(input, num_samples, output, output_size_bytes, bytes_written)
+                : this->encode_frame(input, num_samples, output, output_size_bytes, bytes_written);
         if (result != FLAC_ENCODER_SUCCESS) {
             return result;
         }
@@ -1869,7 +2101,7 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     this->sample_rate_extra_[1] = rate.extra[1];
     this->sample_rate_extra_len_ = rate.extra_len;
 #ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
-    if (options.lpc) {
+    if (options.lpc && bits_per_sample <= MAX_LPC_BITS_PER_SAMPLE) {
         this->lpc_max_order_ = options.max_lpc_order;
         this->lpc_precision_ = static_cast<uint8_t>(lpc_precision(bits_per_sample, block_size));
         this->lpc_stereo_search_ = options.lpc_stereo_search && (num_channels == 2);
@@ -2028,58 +2260,66 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     // ---- Stereo Pass A: one walk analyzes all four candidates ----
     //
     // Each chunk is unpacked to [left, right] and scanned, then converted to
-    // [mid, side] in place and scanned again.
+    // [mid, side] in place and scanned again. The scans are scoped to Pass A,
+    // keeping the stack frame within Xtensa's 1020-byte l32i reach.
     const bool estimate_stereo = this->stereo_estimation_enabled_;
-    SignalScan scan_l{};
-    SignalScan scan_r{};
-    SignalScan scan_mid{};
-    SignalScan scan_side{};
-    uint32_t bits[4] = {0, 0, 0, 0};  // Each candidate's samples ORed, indexed by SignalId
-    for (uint32_t start = 0; start < num_samples; start += chunk_len) {
-        const uint32_t m = (num_samples - start > chunk_len) ? chunk_len : (num_samples - start);
-        unpack_stereo(a, b, input + (static_cast<size_t>(start) * 2 * bytes), m, bps, bytes);
-        const bool first = (start == 0);
-        const uint32_t begin = first ? warmup : 0;
-        if (first) {
-            scan_begin(scan_l, a, warmup);
-            scan_begin(scan_r, b, warmup);
-        }
-        scan_chunk(scan_l, a, begin, m, bps);
-        scan_chunk(scan_r, b, begin, m, bps);
-        if (estimate_stereo) {
-            if (find_wasted) {
-                left_right_to_mid_side_or(a, b, m, bits);
-            } else {
-                left_right_to_mid_side(a, b, m);
-            }
+    ChannelAnalysis analyses[4];        // Indexed by SignalId
+    uint32_t wasted[4] = {0, 0, 0, 0};  // Indexed by SignalId
+    {
+        SignalScan scan_l{};
+        SignalScan scan_r{};
+        SignalScan scan_mid{};
+        SignalScan scan_side{};
+        uint32_t bits[4] = {0, 0, 0, 0};  // Each candidate's samples ORed, indexed by SignalId
+        for (uint32_t start = 0; start < num_samples; start += chunk_len) {
+            const uint32_t m =
+                (num_samples - start > chunk_len) ? chunk_len : (num_samples - start);
+            unpack_stereo(a, b, input + (static_cast<size_t>(start) * 2 * bytes), m, bps, bytes);
+            const bool first = (start == 0);
+            const uint32_t begin = first ? warmup : 0;
             if (first) {
-                scan_begin(scan_mid, a, warmup);
-                scan_begin(scan_side, b, warmup);
+                scan_begin(scan_l, a, warmup);
+                scan_begin(scan_r, b, warmup);
             }
-            scan_chunk(scan_mid, a, begin, m, bps);
-            scan_chunk(scan_side, b, begin, m, side_bps);
-        } else if (find_wasted) {
-            bits[0] |= or_samples(a, m);
-            bits[1] |= or_samples(b, m);
+            scan_chunk(scan_l, a, begin, m, bps);
+            scan_chunk(scan_r, b, begin, m, bps);
+            if (estimate_stereo) {
+                if (find_wasted) {
+                    left_right_to_mid_side_or(a, b, m, bits);
+                } else {
+                    left_right_to_mid_side(a, b, m);
+                }
+                if (first) {
+                    scan_begin(scan_mid, a, warmup);
+                    scan_begin(scan_side, b, warmup);
+                }
+                scan_chunk(scan_mid, a, begin, m, bps);
+                scan_chunk(scan_side, b, begin, m, side_bps);
+            } else if (find_wasted) {
+                bits[0] |= or_samples(a, m);
+                bits[1] |= or_samples(b, m);
+            }
+        }
+
+        // Wasted bits are found per candidate, mid from its own samples: when left
+        // and right share k, mid may keep only k - 1, since the decoder rebuilds
+        // mid's dropped low bit from side's.
+        analyses[0] = finish_wasted_analysis(scan_l, num_samples, bps, bits[0], wasted[0]);
+        analyses[1] = finish_wasted_analysis(scan_r, num_samples, bps, bits[1], wasted[1]);
+        if (estimate_stereo) {
+            analyses[2] = finish_wasted_analysis(scan_mid, num_samples, bps, bits[2], wasted[2]);
+            analyses[3] =
+                finish_wasted_analysis(scan_side, num_samples, side_bps, bits[3], wasted[3]);
         }
     }
-
-    // Wasted bits are found per candidate, mid from its own samples: when left
-    // and right share k, mid may keep only k - 1, since the decoder rebuilds
-    // mid's dropped low bit from side's.
-    uint32_t wasted[4] = {0, 0, 0, 0};  // Indexed by SignalId
-    const ChannelAnalysis analysis_l =
-        finish_wasted_analysis(scan_l, num_samples, bps, bits[0], wasted[0]);
-    const ChannelAnalysis analysis_r =
-        finish_wasted_analysis(scan_r, num_samples, bps, bits[1], wasted[1]);
     StereoPlan plan{};
     plan.channel_assignment = static_cast<uint8_t>(CHANNEL_INDEPENDENT_STEREO);
     plan.sig0 = SignalId::LEFT;
     plan.bps0 = bps;
-    plan.analysis0 = analysis_l;
+    plan.analysis0 = analyses[0];
     plan.sig1 = SignalId::RIGHT;
     plan.bps1 = bps;
-    plan.analysis1 = analysis_r;
+    plan.analysis1 = analyses[1];
     SubframeSettings settings0 = settings;
     SubframeSettings settings1 = settings;
     const LpcCandidate* designed0 = nullptr;
@@ -2089,15 +2329,9 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     StereoLpc searched;
 #endif
     if (estimate_stereo) {
-        const ChannelAnalysis analysis_mid =
-            finish_wasted_analysis(scan_mid, num_samples, bps, bits[2], wasted[2]);
-        const ChannelAnalysis analysis_side =
-            finish_wasted_analysis(scan_side, num_samples, side_bps, bits[3], wasted[3]);
-        plan = choose_stereo_plan(analysis_l, analysis_r, analysis_mid, analysis_side, bps);
+        plan = choose_stereo_plan(analyses[0], analyses[1], analyses[2], analyses[3], bps);
 #ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
         if (this->lpc_stereo_search_) {
-            const ChannelAnalysis analyses[4] = {analysis_l, analysis_r, analysis_mid,
-                                                 analysis_side};
             plan = search_stereo_lpc(base, analyses, bps, settings, wasted, searched);
             designed0 = searched_design(searched, 0, settings0);
             designed1 = searched_design(searched, 1, settings1);
@@ -2122,4 +2356,64 @@ FLACEncoderResult FLACEncoder::encode_frame(const uint8_t* input, uint32_t num_s
     return this->finish_frame(close_frame(bw, output), num_samples, bytes_written);
 }
 
+// encode_frame() for streams deeper than MAX_SCAN32_BITS_PER_SAMPLE: the
+// 64-bit Pass A, then the same Pass B, with fixed predictors only. Separate,
+// so encode_frame()'s tuned loops never see the 64-bit path.
+FLAC_COLD_SECTION FLACEncoderResult FLACEncoder::encode_frame64(const uint8_t* input,
+                                                                uint32_t num_samples,
+                                                                uint8_t* output,
+                                                                size_t output_size_bytes,
+                                                                size_t& bytes_written) {
+    const uint32_t bps = this->format_.bits_per_sample();
+    const uint32_t nch = this->format_.num_channels();
+
+    // Each signal of this frame is `base` with its channel or candidate set
+    const PackedSignal base{input,          num_samples,  bps,           4, nch, 0,
+                            SignalId::LEFT, this->chunk_, CHUNK_SAMPLES, 0};
+    const SubframeSettings settings{0, 0, this->max_partition_order_};
+    const bool find_wasted = this->options_.wasted_bits;
+    BitWriterLocal bw{};
+
+    if (nch != 2) {
+        const uint8_t header_len =
+            this->start_frame(output, num_samples, static_cast<uint8_t>(nch - 1));
+        writer_init(bw, output + header_len, output_size_bytes - header_len);
+        for (uint32_t ch = 0; ch < nch; ch++) {
+            PackedSignal signal = base;
+            signal.channel = ch;
+            const ChannelAnalysis analysis = analyze_channel64(signal, find_wasted, signal.wasted);
+            write_subframe(bw, signal, bps - signal.wasted, analysis, settings, nullptr);
+        }
+        return this->finish_frame(close_frame(bw, output), num_samples, bytes_written);
+    }
+
+    const bool estimate_stereo = this->stereo_estimation_enabled_;
+    ChannelAnalysis analyses[4];        // Indexed by SignalId
+    uint32_t wasted[4] = {0, 0, 0, 0};  // Indexed by SignalId
+    analyze_stereo64(base, estimate_stereo, find_wasted, analyses, wasted);
+    StereoPlan plan{};
+    plan.channel_assignment = static_cast<uint8_t>(CHANNEL_INDEPENDENT_STEREO);
+    plan.sig0 = SignalId::LEFT;
+    plan.bps0 = bps;
+    plan.analysis0 = analyses[0];
+    plan.sig1 = SignalId::RIGHT;
+    plan.bps1 = bps;
+    plan.analysis1 = analyses[1];
+    if (estimate_stereo) {
+        plan = choose_stereo_plan(analyses[0], analyses[1], analyses[2], analyses[3], bps);
+    }
+
+    const uint8_t header_len = this->start_frame(output, num_samples, plan.channel_assignment);
+    writer_init(bw, output + header_len, output_size_bytes - header_len);
+    PackedSignal signal0 = base;
+    signal0.sig = plan.sig0;
+    signal0.wasted = wasted[static_cast<uint32_t>(plan.sig0)];
+    write_subframe(bw, signal0, plan.bps0 - signal0.wasted, plan.analysis0, settings, nullptr);
+    PackedSignal signal1 = base;
+    signal1.sig = plan.sig1;
+    signal1.wasted = wasted[static_cast<uint32_t>(plan.sig1)];
+    write_subframe(bw, signal1, plan.bps1 - signal1.wasted, plan.analysis1, settings, nullptr);
+
+    return this->finish_frame(close_frame(bw, output), num_samples, bytes_written);
+}
 }  // namespace micro_flac

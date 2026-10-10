@@ -15,7 +15,7 @@
 /// @file flac_encoder.h
 /// @brief FLAC encoder optimized for ESP32
 ///
-/// Encodes 4-24 bit PCM in 1-8 channels from the packed byte layout in
+/// Encodes 4-32 bit PCM in 1-8 channels from the packed byte layout in
 /// pcm_format.h, which is what FLACDecoder's uint8_t* decode() produces.
 /// Spec: https://www.rfc-editor.org/rfc/rfc9639.html
 
@@ -88,7 +88,8 @@ struct FLACEncoderOptions {
     /// is estimated to code smaller than the fixed predictors. On 16-bit
     /// music it makes the output about 7-9% smaller and encodes at under half
     /// the speed. Validated, then ignored, in a build without LPC
-    /// (FLACEncoder::LPC_AVAILABLE).
+    /// (FLACEncoder::LPC_AVAILABLE) and on streams deeper than
+    /// FLACEncoder::MAX_LPC_BITS_PER_SAMPLE.
     bool lpc{false};
 
     /// Highest LPC order tried, in [1, FLACEncoder::MAX_LPC_ORDER]. Higher
@@ -193,7 +194,7 @@ struct FLACEncoderOptions {
  *       count and frame sizes stay "unknown" (RFC 9639 SS8.2). The MD5
  *       signature is always left unset. A caller that wants one hashes its
  *       input and writes the digest into the header's last 16 bytes, as
- *       host_examples/wav_to_flac does. At depths other than 8, 16 and 24,
+ *       host_examples/wav_to_flac does. At depths other than 8, 16, 24 and 32,
  *       each sample must first be right-justified and sign-extended in its
  *       bytes before hashing.
  */
@@ -231,7 +232,8 @@ public:
     /// @brief Deepest stream FLACEncoderOptions::lpc applies to
     ///
     /// 24, or 0 without LPC. Streams deeper than 16 bits take 64-bit
-    /// arithmetic, which Xtensa builds from 32-bit halves.
+    /// arithmetic, which Xtensa builds from 32-bit halves. Streams deeper
+    /// than this use the fixed predictors only.
 #ifdef MICRO_FLAC_ENCODER_DISABLE_LPC
     static constexpr uint8_t MAX_LPC_BITS_PER_SAMPLE = 0;
 #else
@@ -255,7 +257,7 @@ public:
     /// @brief Construct an encoder for one input format
     ///
     /// Always succeeds. The configuration is reported by the first
-    /// write_header(), encode() or finish() call. Supported: 1-8 channels, 4-24
+    /// write_header(), encode() or finish() call. Supported: 1-8 channels, 4-32
     /// bits per sample, and sample rates of 1-1048575 Hz. Rates no frame header
     /// code can carry (above 65535 Hz, other than multiples of 10 up to 655350
     /// Hz and whole kHz up to 255 kHz) are read from STREAMINFO, outside the
@@ -447,6 +449,10 @@ private:
     /// @brief Encode `num_samples` samples per channel from `input` as one frame
     FLACEncoderResult encode_frame(const uint8_t* input, uint32_t num_samples, uint8_t* output,
                                    size_t output_size_bytes, size_t& bytes_written);
+
+    /// @brief encode_frame() for 25-32 bit streams, whose analysis runs in 64 bits
+    FLACEncoderResult encode_frame64(const uint8_t* input, uint32_t num_samples, uint8_t* output,
+                                     size_t output_size_bytes, size_t& bytes_written);
 
     /// @brief Write this frame's header (RFC 9639 SS9.1) at `output`
     ///

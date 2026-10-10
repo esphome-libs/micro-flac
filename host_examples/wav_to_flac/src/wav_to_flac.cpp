@@ -46,13 +46,15 @@ constexpr size_t FMT_CHUNK_SCRATCH_SIZE = 40;  // enough for the WAVE_FORMAT_EXT
 constexpr size_t WAVE_FORMAT_EXTENSIBLE_MIN_SIZE = 40;
 
 // ============================================================================
-// Minimal WAV reader (8/16/24-bit PCM, 1-8 channels)
+// Minimal WAV reader (8/16/24/32-bit PCM containers, 1-8 channels)
 // ============================================================================
 
 struct WavInfo {
     uint32_t sample_rate{0};
     uint16_t num_channels{0};
-    uint16_t bits_per_sample{0};
+    uint16_t bits_per_sample{0};  // Significant bits: the fmt chunk's, or
+                                  // WAVE_FORMAT_EXTENSIBLE's valid bits
+    uint16_t container_bits{0};   // Bits each sample occupies (8, 16, 24 or 32)
     long data_offset{0};
     uint64_t data_size{0};
 };
@@ -60,9 +62,12 @@ struct WavInfo {
 // Reads a RIFF/WAVE header, walking chunks (in any order, skipping unknown
 // ones) until both "fmt " and "data" have been found. Understands standard
 // PCM (format 1) and WAVE_FORMAT_EXTENSIBLE (format 0xFFFE) fmt chunks;
-// rejects anything else (compressed formats, float PCM, depths other than
-// 8/16/24, more than 8 channels). Leaves the file position unspecified; callers must
-// std::fseek() to info.data_offset before reading samples.
+// rejects anything else (compressed formats, float PCM, containers other than
+// 8/16/24/32 bits, more than 8 channels). The depth is the fmt chunk's bits
+// per sample, rounded up to whole bytes for the container (a plain PCM file
+// may say 28), or an EXTENSIBLE chunk's valid bits. Leaves the file position
+// unspecified; callers must std::fseek() to info.data_offset before reading
+// samples.
 bool read_wav_header(FILE* f, WavInfo& info) {
     char riff_id[4];
     uint32_t riff_size = 0;
@@ -126,6 +131,7 @@ bool read_wav_header(FILE* f, WavInfo& info) {
                                (static_cast<uint32_t>(fmt_buf[7]) << 24);
             info.bits_per_sample =
                 static_cast<uint16_t>(fmt_buf[14] | (static_cast<uint16_t>(fmt_buf[15]) << 8));
+            info.container_bits = static_cast<uint16_t>(((info.bits_per_sample + 7U) / 8U) * 8U);
 
             if (audio_format == WAVE_FORMAT_EXTENSIBLE &&
                 chunk_size >= WAVE_FORMAT_EXTENSIBLE_MIN_SIZE) {
@@ -133,6 +139,12 @@ bool read_wav_header(FILE* f, WavInfo& info) {
                 // real (legacy) format code.
                 audio_format =
                     static_cast<uint16_t>(fmt_buf[24] | (static_cast<uint16_t>(fmt_buf[25]) << 8));
+                // Valid bits at byte 18; 0 means the whole container
+                const uint16_t valid_bits =
+                    static_cast<uint16_t>(fmt_buf[18] | (static_cast<uint16_t>(fmt_buf[19]) << 8));
+                if (valid_bits != 0) {
+                    info.bits_per_sample = valid_bits;
+                }
             }
             // NOLINTEND(readability-magic-numbers)
             have_fmt = true;
@@ -163,10 +175,20 @@ bool read_wav_header(FILE* f, WavInfo& info) {
                      audio_format);
         return false;
     }
-    if (info.bits_per_sample != 8 && info.bits_per_sample != 16 && info.bits_per_sample != 24) {
+    if (info.container_bits != 8 && info.container_bits != 16 && info.container_bits != 24 &&
+        info.container_bits != 32) {
         std::fprintf(stderr,
-                     "Error: unsupported bit depth %u (8, 16 and 24-bit PCM are supported)\n",
-                     info.bits_per_sample);
+                     "Error: unsupported sample width %u (8, 16, 24 and 32-bit PCM are "
+                     "supported)\n",
+                     info.container_bits);
+        return false;
+    }
+    // PcmFormat's bytes per sample is ceil(depth / 8), so the depth must use
+    // the container's top byte
+    if (info.bits_per_sample > info.container_bits ||
+        info.bits_per_sample + 8 <= info.container_bits) {
+        std::fprintf(stderr, "Error: unsupported valid bit depth %u in %u-bit samples\n",
+                     info.bits_per_sample, info.container_bits);
         return false;
     }
     if (info.num_channels < 1 || info.num_channels > MAX_CHANNELS) {
@@ -188,6 +210,27 @@ bool read_wav_header(FILE* f, WavInfo& info) {
         }
     }
     return true;
+}
+
+// Copy `size` bytes of `format`'s packed samples into `out`, each shifted to
+// the bottom of its bytes and sign-extended, as the MD5 signature hashes them
+void right_justify(const uint8_t* in, size_t size, const PcmFormat& format,
+                   std::vector<uint8_t>& out) {
+    const uint32_t bytes = format.bytes_per_sample();
+    const uint32_t shift = (bytes * 8) - format.bits_per_sample();
+    out.resize(size);
+    for (size_t i = 0; i + bytes <= size; i += bytes) {
+        uint32_t word = 0;
+        for (uint32_t b = 0; b < bytes; b++) {
+            word |= static_cast<uint32_t>(in[i + b]) << (8 * (b + 4 - bytes));
+        }
+        // At the top of a word, so an arithmetic shift sign-extends it
+        const uint32_t value =
+            static_cast<uint32_t>(static_cast<int32_t>(word) >> shift) >> (8 * (4 - bytes));
+        for (uint32_t b = 0; b < bytes; b++) {
+            out[i + b] = static_cast<uint8_t>(value >> (8 * b));
+        }
+    }
 }
 
 // ============================================================================
@@ -308,7 +351,7 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     WavInfo wav_info;
     if (!read_wav_header(wav_file, wav_info)) {
         std::fprintf(stderr,
-                     "Error: '%s' is not a supported WAV file (must be 8/16/24-bit PCM, 1-%u "
+                     "Error: '%s' is not a supported WAV file (must be 8/16/24/32-bit PCM, 1-%u "
                      "channels)\n",
                      args.input_file, MAX_CHANNELS);
         std::fclose(wav_file);
@@ -375,10 +418,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     // The stream's MD5 signature, which FLACEncoder leaves to its caller
     // (STREAMINFO's field stays zero, "unknown", otherwise). RFC 9639 SS8.2
     // defines it over the samples interleaved, signed, little-endian, in
-    // whole bytes: exactly PcmFormat's layout for the byte-aligned depths a
-    // WAV file carries, so each block is hashed as read (after the 8-bit sign
-    // flip) and patched into the finished header at the end.
+    // whole bytes: exactly PcmFormat's layout at byte-aligned depths, so each
+    // block is hashed as read (after the 8-bit sign flip), or right-justified
+    // first at other depths, and patched into the finished header at the end.
     MD5 md5;
+    std::vector<uint8_t> md5_buffer;  // Right-justified samples, at other depths
 
     std::printf("Encoding...\n");
     std::printf("  Input: %s\n", args.input_file);
@@ -418,12 +462,17 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
             return 1;
         }
         data_remaining -= got;
-        if (format.bits_per_sample() == 8) {
+        if (format.bytes_per_sample() == 1) {
             for (size_t i = 0; i < got; i++) {
                 in_buffer[i] ^= WAV_8BIT_SIGN_FLIP;
             }
         }
-        md5.update(in_buffer.data(), got);
+        if (format.bits_per_sample() % 8 == 0) {
+            md5.update(in_buffer.data(), got);
+        } else {
+            right_justify(in_buffer.data(), got, format, md5_buffer);
+            md5.update(md5_buffer.data(), got);
+        }
 
         if (got == in_buffer.size()) {
             size_t bytes_consumed = 0;

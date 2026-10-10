@@ -192,9 +192,27 @@ void widen_to_24bit(uint8_t* dst, const int16_t* src, size_t count) {
     }
 }
 
+// Widens `count` samples of the 16-bit clip to packed 32-bit PCM (4 bytes
+// each), as widen_to_24bit() does with 16 low bits of noise
+void widen_to_32bit(uint8_t* dst, const int16_t* src, size_t count) {
+    uint32_t rng = 0x2468ACE1U;
+    for (size_t i = 0; i < count; i++) {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        const uint32_t v =
+            (static_cast<uint32_t>(static_cast<int32_t>(src[i])) << 16) | (rng & 0xFFFFU);
+        dst[(4 * i) + 0] = static_cast<uint8_t>(v);
+        dst[(4 * i) + 1] = static_cast<uint8_t>(v >> 8);
+        dst[(4 * i) + 2] = static_cast<uint8_t>(v >> 16);
+        dst[(4 * i) + 3] = static_cast<uint8_t>(v >> 24);
+    }
+}
+
 // Encodes NUM_PASSES passes over the clip as one stream, timing every
 // encode() call. Only whole blocks are encoded, so every frame is block_size
-// samples. `input` is the clip as packed PCM at `bits_per_sample` (16 or 24).
+// samples. `input` is the clip as packed PCM at `bits_per_sample` (16, 24 or
+// 32).
 EncodeBenchmarkStats run_encode_benchmark(const uint8_t* input, uint32_t samples_per_channel,
                                           const char* label, uint32_t bits_per_sample,
                                           uint32_t num_channels, uint32_t block_size,
@@ -421,7 +439,8 @@ extern "C" void app_main(void) {
     // The 24-bit cases encode the clip widened into a second PSRAM buffer,
     // exercising the 3-byte unpacking. The mono case runs last: it compacts that
     // buffer's left channel in place, since PSRAM has no room for a third
-    // copy.
+    // copy. The 32-bit cases then replace it with the clip's first 20
+    // seconds at 32 bits, since the whole clip does not fit.
     struct TestCase {
         const char* label;
         uint32_t bits_per_sample;
@@ -451,6 +470,8 @@ extern "C" void app_main(void) {
         {"24b 4096 r6", 24, 2, 4096, 0, false, 6},
         {"24b LPC-8 4096", 24, 2, 4096, 8, false, 0},
         {"24b mono 4096", 24, 1, 4096, 0, false, 0},
+        {"32b 4096 (large)", 32, 2, 4096, 0, false, 0},
+        {"32b 4096 r6", 32, 2, 4096, 0, false, 6},
     };
     constexpr size_t num_tests = sizeof(test_cases) / sizeof(test_cases[0]);
 
@@ -469,10 +490,33 @@ extern "C" void app_main(void) {
     EncodeBenchmarkStats results[num_tests];
     size_t num_run = 0;
     bool mono24_ready = false;
+    uint8_t* signal32 = nullptr;
+    bool signal32_tried = false;
+    const uint32_t samples32 =
+        (samples_per_channel < g_sample_rate * 20) ? samples_per_channel : g_sample_rate * 20;
     for (size_t i = 0; i < num_tests; i++) {
         const TestCase& tc = test_cases[i];
         const uint8_t* input = reinterpret_cast<const uint8_t*>(signal);
-        if (tc.bits_per_sample == 24) {
+        uint32_t case_samples = samples_per_channel;
+        if (tc.bits_per_sample == 32) {
+            if (!signal32_tried) {
+                signal32_tried = true;
+                heap_caps_free(signal24);
+                signal24 = nullptr;
+                const size_t count = static_cast<size_t>(samples32) * g_num_channels;
+                signal32 = static_cast<uint8_t*>(
+                    heap_caps_malloc(count * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+                if (signal32) {
+                    widen_to_32bit(signal32, signal, count);
+                } else {
+                    printf("WARNING: no room for the %.1f KB 32-bit clip; skipping the 32-bit "
+                           "cases\n",
+                           count * 4 / 1024.0);
+                }
+            }
+            input = signal32;
+            case_samples = samples32;
+        } else if (tc.bits_per_sample == 24) {
             input = signal24;
             if (signal24 != nullptr && tc.num_channels == 1 && !mono24_ready) {
                 // Frame i's left sample moves from byte 3 * i * channels to
@@ -486,15 +530,16 @@ extern "C" void app_main(void) {
         if (input == nullptr) {
             continue;
         }
-        results[num_run] = run_encode_benchmark(
-            input, samples_per_channel, tc.label, tc.bits_per_sample, tc.num_channels,
-            tc.block_size, tc.lpc_order, tc.lpc_stereo_search, tc.partition_order);
+        results[num_run] = run_encode_benchmark(input, case_samples, tc.label, tc.bits_per_sample,
+                                                tc.num_channels, tc.block_size, tc.lpc_order,
+                                                tc.lpc_stereo_search, tc.partition_order);
         print_benchmark_results(results[num_run]);
         num_run++;
     }
 
     print_summary(results, num_run);
     heap_caps_free(signal24);
+    heap_caps_free(signal32);
 
     heap_caps_free(signal);
     printf("Benchmark complete.\n");
