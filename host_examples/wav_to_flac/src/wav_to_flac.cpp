@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "file_io.h"      // host_examples/common/include, shared with flac_to_wav
 #include "flac_format.h"  // Channel assignment codes, MAGIC_BYTES, STREAMINFO_SIZE
 #include "md5.h"          // host_examples/common/include, shared with flac_to_wav
 #include "micro_flac/flac_encoder.h"
@@ -298,6 +299,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
         std::fprintf(stderr, "Error: could not open input file: %s\n", args.input_file);
         return 1;
     }
+    if (is_same_file(args.output_file, args.input_file)) {
+        std::fprintf(stderr, "Error: the output file is the input file: %s\n", args.output_file);
+        std::fclose(wav_file);
+        return 1;
+    }
 
     WavInfo wav_info;
     if (!read_wav_header(wav_file, wav_info)) {
@@ -315,8 +321,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     // WAV_8BIT_SIGN_FLIP).
     const PcmFormat format(wav_info.sample_rate, wav_info.num_channels, wav_info.bits_per_sample);
 
+    // read_wav_header() rejects a zero channel count or bit depth; the guard
+    // keeps the division visibly safe for static analysis
     const uint64_t bytes_per_frame = format.bytes_per_frame();
-    const uint64_t total_samples_per_channel = wav_info.data_size / bytes_per_frame;
+    const uint64_t total_samples_per_channel =
+        (bytes_per_frame > 0) ? wav_info.data_size / bytes_per_frame : 0;
     if (total_samples_per_channel == 0) {
         std::fprintf(stderr, "Error: '%s' contains no audio samples\n", args.input_file);
         std::fclose(wav_file);
@@ -356,7 +365,12 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
         std::fclose(wav_file);
         return 1;
     }
-    std::fwrite(out_buffer.data(), 1, bytes_written, flac_file);
+    if (!write_all(flac_file, out_buffer.data(), bytes_written)) {
+        std::fprintf(stderr, "Error: could not write output file: %s\n", args.output_file);
+        std::fclose(wav_file);
+        std::fclose(flac_file);
+        return 1;
+    }
 
     // The stream's MD5 signature, which FLACEncoder leaves to its caller
     // (STREAMINFO's field stays zero, "unknown", otherwise). RFC 9639 SS8.2
@@ -452,7 +466,12 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
             }
         }
 
-        std::fwrite(out_buffer.data(), 1, bytes_written, flac_file);
+        if (!write_all(flac_file, out_buffer.data(), bytes_written)) {
+            std::fprintf(stderr, "Error: could not write output file: %s\n", args.output_file);
+            std::fclose(wav_file);
+            std::fclose(flac_file);
+            return 1;
+        }
         total_output_bytes += bytes_written;
         if (bytes_written > largest_frame_bytes) {
             largest_frame_bytes = bytes_written;
@@ -471,8 +490,11 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
     const std::array<uint8_t, MD5_SIGNATURE_BYTES> md5_signature = md5.finalize();
     std::memcpy(out_buffer.data() + STREAMINFO_MD5_OFFSET, md5_signature.data(),
                 md5_signature.size());
-    std::fwrite(out_buffer.data(), 1, bytes_written, flac_file);
-    std::fclose(flac_file);
+    const bool header_written = write_all(flac_file, out_buffer.data(), bytes_written);
+    if (!close_checked(flac_file) || !header_written) {
+        std::fprintf(stderr, "Error: could not write output file: %s\n", args.output_file);
+        return 1;
+    }
 
     const uint64_t samples_encoded = encoder.get_total_samples_encoded();
     const uint64_t total_samples_all_channels = samples_encoded * wav_info.num_channels;

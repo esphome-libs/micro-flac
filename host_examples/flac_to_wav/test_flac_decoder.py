@@ -81,8 +81,8 @@ def extract_pcm_from_wav(wav_file):
                     # Found data chunk, read PCM data
                     return f.read(chunk_size)
                 else:
-                    # Skip this chunk
-                    f.seek(chunk_size, 1)
+                    # Skip this chunk and its pad byte (RIFF pads odd chunks)
+                    f.seek(chunk_size + chunk_size % 2, 1)
     except Exception as e:
         print(f"Error reading WAV file {wav_file}: {e}")
         return None
