@@ -107,10 +107,19 @@
 #define FLAC_MAY_ALIAS
 #endif
 
+// 1 on little-endian targets, where a native 16- or 32-bit access to packed
+// PCM matches its little-endian byte order. Big-endian targets read and write
+// PCM a byte at a time instead.
+#if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define FLAC_LITTLE_ENDIAN 1
+#else
+#define FLAC_LITTLE_ENDIAN 0
+#endif
+
 // 64-bit little-endian hosts with cheap unaligned 32-bit loads. Xtensa faults
 // on them and RISC-V may trap, so embedded targets leave this undefined.
 #if (defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)) && \
-    (!defined(__BYTE_ORDER__) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    FLAC_LITTLE_ENDIAN
 #define FLAC_FAST_UNALIGNED_LOADS 1
 #endif
 
@@ -128,8 +137,9 @@
 
 namespace micro_flac {
 
-// Types for reading packed PCM bytes more than one byte at a time. The
-// buffer's real type is the caller's, so these must be allowed to alias it.
+// Types for reading packed PCM bytes more than one byte at a time, on
+// little-endian targets only. The buffer's real type is the caller's, so
+// these must be allowed to alias it.
 typedef int16_t FLAC_MAY_ALIAS aliased_int16_t;
 typedef uint32_t FLAC_MAY_ALIAS aliased_uint32_t;
 

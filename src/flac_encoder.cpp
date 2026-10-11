@@ -27,12 +27,6 @@
 #include <cstdint>
 #include <cstring>
 
-// Unpacking (pcm_packing.cpp) reads the little-endian input's 2-byte samples
-// as native int16_t and its 3-byte samples as little-endian words.
-#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
-#error "FLACEncoder requires a little-endian target"
-#endif
-
 namespace micro_flac {
 
 namespace {
