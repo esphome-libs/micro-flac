@@ -603,7 +603,7 @@ FLAC_COLD_SECTION FLAC_NOINLINE ChannelAnalysis finish_analysis64(const Scan64& 
     uint32_t orders = 0;
     for (uint32_t o = 0; o <= MAX_FIXED_ORDER; o++) {
         sums[o] = scan.sum[o] >> wasted;
-        if ((scan.magnitude_or[o] >> wasted) < (static_cast<uint64_t>(1) << 31)) {
+        if ((scan.magnitude_or[o] >> wasted) < RESIDUAL_MAGNITUDE_LIMIT) {
             orders |= 1U << o;
         }
     }

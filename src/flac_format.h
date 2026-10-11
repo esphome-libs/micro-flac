@@ -179,6 +179,12 @@ static constexpr uint8_t RICE_PARAMETER_MAX = 30;
 /// @brief Bits in a residual's partition order field (Section 9.2.7)
 static constexpr uint8_t RICE_PARTITION_ORDER_BITS = 4;
 
+/// @brief Bound on a Rice-coded residual's magnitude (Section 9.2.7.3)
+///
+/// A residual must fit a 32-bit signed integer other than its most negative
+/// value, so |r| < 2^31.
+static constexpr uint64_t RESIDUAL_MAGNITUDE_LIMIT = uint64_t{1} << 31;
+
 // ============================================================================
 // Ogg encapsulation (RFC 9639 Section 10.1)
 // ============================================================================
