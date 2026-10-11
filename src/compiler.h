@@ -44,6 +44,16 @@
 #define FLAC_HOT
 #endif
 
+// Code a build carries but rarely runs, kept apart from the hot functions.
+// Emitted among them, the 25-32 bit path moved them into conflicting ESP32-S3
+// instruction-cache sets (0.2-0.6% on 16/24-bit encodes). Unlike the cold
+// attribute, a section does not also optimize for size.
+#if defined(__XTENSA__) && defined(__GNUC__) && !defined(__clang__)
+#define FLAC_COLD_SECTION __attribute__((section(".text.unlikely.micro_flac_cold")))
+#else
+#define FLAC_COLD_SECTION
+#endif
+
 // Prevent inlining. Useful for extracting a tight loop into its own function
 // so the compiler can allocate registers for it without pressure from a
 // surrounding large switch/state machine.

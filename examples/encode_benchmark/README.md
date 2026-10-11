@@ -9,6 +9,7 @@ Measures FLAC encoding performance on ESP32-S3 and ESP32-P4. Decodes the embedde
 - LPC (`FLACEncoderOptions::lpc`) at orders 4, 8 and 12, and with `lpc_stereo_search`
 - Rice partitioning up to order 6 (`max_rice_partition_order`, the "r6" cases)
 - 24-bit stereo and mono (the same clip widened to 24 bits), with and without LPC
+- 32-bit stereo (the clip's first 20 seconds widened to 32 bits, which is all that fits in PSRAM beside the 16-bit copy), with and without Rice partitioning
 - Per-frame timing with min/max/avg/stddev
 - Real-Time Factor (RTF) and realtime multiple per test case
 - Achieved bytes/sample, bits/sample, and compression ratio vs. the input PCM
@@ -43,7 +44,7 @@ When switching targets in an existing build directory, run `idf.py fullclean` (o
 
 ## Expected Output
 
-The benchmark runs each test case in turn and prints a combined summary table at the end. The 16-bit cases encode the 30-second 48 kHz stereo clip; the 24-bit cases encode the same clip widened to 24 bits. Each case encodes the clip 8 times: Time (ms) is the total across all 8 passes (240 s of audio), while Real-time is per pass.
+The benchmark runs each test case in turn and prints a combined summary table at the end. The 16-bit cases encode the 30-second 48 kHz stereo clip; the 24-bit cases encode the same clip widened to 24 bits, and the 32-bit cases its first 20 seconds widened to 32 bits. Each case encodes its clip 8 times: Time (ms) is the total across all 8 passes (240 s of audio, 160 s for the 32-bit cases), while Real-time is per pass.
 
 ### ESP32-S3 @ 240 MHz
 
@@ -73,6 +74,8 @@ The benchmark runs each test case in turn and prints a combined summary table at
   24b 4096 r6             17707.02         13.5x       1.874      1.601x
   24b LPC-8 4096          57844.81          4.1x       1.836      1.634x
   24b mono 4096            6045.64         39.6x       1.882      1.594x
+  32b 4096 (large)        41654.91          3.8x       2.797      1.430x
+  32b 4096 r6             48137.38          3.3x       2.793      1.432x
 ```
 
 ### ESP32-P4 @ 360 MHz

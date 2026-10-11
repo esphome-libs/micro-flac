@@ -42,6 +42,9 @@ static constexpr size_t STREAMINFO_SIZE = 34;
 /// @brief Shallowest bit depth a stream can have (Section 8.2)
 static constexpr uint32_t MIN_BITS_PER_SAMPLE = 4;
 
+/// @brief Deepest bit depth a stream can have (Section 8.2)
+static constexpr uint32_t MAX_BITS_PER_SAMPLE = 32;
+
 /// @brief Largest value of STREAMINFO's 36-bit total-samples field
 static constexpr uint64_t TOTAL_SAMPLES_MAX = (1ULL << 36) - 1;
 
@@ -178,6 +181,12 @@ static constexpr uint8_t RICE_PARAMETER_MAX = 30;
 
 /// @brief Bits in a residual's partition order field (Section 9.2.7)
 static constexpr uint8_t RICE_PARTITION_ORDER_BITS = 4;
+
+/// @brief Bound on a Rice-coded residual's magnitude (Section 9.2.7.3)
+///
+/// A residual must fit a 32-bit signed integer other than its most negative
+/// value, so |r| < 2^31.
+static constexpr uint64_t RESIDUAL_MAGNITUDE_LIMIT = uint64_t{1} << 31;
 
 // ============================================================================
 // Ogg encapsulation (RFC 9639 Section 10.1)

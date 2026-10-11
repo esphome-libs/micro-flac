@@ -334,6 +334,13 @@ FLAC_ALWAYS_INLINE int32_t read_packed_sample(const uint8_t* p, Shift shift) {
     return static_cast<int32_t>(top) >> shift;
 }
 
+// One 4-byte sample, at any alignment, shifted down from the top of the word
+FLAC_ALWAYS_INLINE int32_t read_sample32(const uint8_t* p, uint32_t shift) {
+    uint32_t word = 0;
+    std::memcpy(&word, p, sizeof(word));
+    return static_cast<int32_t>(word) >> shift;
+}
+
 #ifdef FLAC_FAST_UNALIGNED_LOADS
 // read_packed_sample<3>() as one unaligned 32-bit load, on hosts where that
 // is cheap. The fourth byte, the next one in the input, must be readable, so
@@ -546,8 +553,60 @@ int32_t unpack_sample(const uint8_t* p, uint32_t bps, uint32_t bytes) {
             return read_packed_sample<1>(p, shift);
         case 2:
             return read_packed_sample<2>(p, shift);
-        default:  // 3
+        case 3:
             return read_packed_sample<3>(p, shift);
+        default:  // 4
+            return read_sample32(p, shift);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 4-byte samples
+// ----------------------------------------------------------------------------
+//
+// Apart from the 1-3 byte templates: even a compile-time-dead 4-byte branch
+// reschedules their loops. Mid and side are formed in 64 bits. Only 25-32 bit
+// streams run these, so they sit in FLAC_COLD_SECTION (compiler.h).
+
+FLAC_COLD_SECTION void unpack_channel32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch,
+                                        uint32_t num_channels, uint32_t bps) {
+    const size_t frame_bytes = static_cast<size_t>(4) * num_channels;
+    const uint8_t* p = src + (static_cast<size_t>(4) * ch);
+    const uint32_t shift = 32 - bps;
+    for (uint32_t i = 0; i < n; i++) {
+        dst[i] = read_sample32(p + (static_cast<size_t>(i) * frame_bytes), shift);
+    }
+}
+
+FLAC_COLD_SECTION void unpack_stereo32(int32_t* left, int32_t* right, const uint8_t* src,
+                                       uint32_t n, uint32_t bps) {
+    const uint32_t shift = 32 - bps;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t* p = src + (static_cast<size_t>(i) * 8);
+        left[i] = read_sample32(p, shift);
+        right[i] = read_sample32(p + 4, shift);
+    }
+}
+
+FLAC_COLD_SECTION void unpack_mid32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps,
+                                    uint32_t wasted) {
+    const uint32_t shift = 32 - bps;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t* p = src + (static_cast<size_t>(i) * 8);
+        const int64_t sum =
+            static_cast<int64_t>(read_sample32(p, shift)) + read_sample32(p + 4, shift);
+        dst[i] = static_cast<int32_t>(static_cast<uint32_t>(sum >> (wasted + 1)));
+    }
+}
+
+FLAC_COLD_SECTION void unpack_side32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps,
+                                     uint32_t wasted) {
+    const uint32_t shift = 32 - bps;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t* p = src + (static_cast<size_t>(i) * 8);
+        const int64_t difference =
+            static_cast<int64_t>(read_sample32(p, shift)) - read_sample32(p + 4, shift);
+        dst[i] = static_cast<int32_t>(static_cast<uint32_t>(difference >> wasted));
     }
 }
 

@@ -90,9 +90,26 @@ void unpack_mid(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint
 void unpack_side(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t bytes,
                  uint32_t wasted);
 
+/// @brief unpack_channel() for 4-byte samples (25-32 bit streams), at any
+/// alignment
+void unpack_channel32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch,
+                      uint32_t num_channels, uint32_t bps);
+
+/// @brief unpack_stereo() for 4-byte samples
+void unpack_stereo32(int32_t* left, int32_t* right, const uint8_t* src, uint32_t n, uint32_t bps);
+
+/// @brief unpack_mid() for 4-byte samples, with left + right formed in 64 bits
+void unpack_mid32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t wasted);
+
+/// @brief unpack_side() for 4-byte samples, with left - right formed in 64 bits
+///
+/// A 33-bit side keeps its low 32 bits, from which FLACEncoder's wrapping
+/// cascade still gets every residual that fits int32_t.
+void unpack_side32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t wasted);
+
 /// @brief Read one packed sample
 ///
-/// Parameters as unpack_channel().
+/// Parameters as unpack_channel(), with `bytes` 1-4.
 int32_t unpack_sample(const uint8_t* p, uint32_t bps, uint32_t bytes);
 
 }  // namespace micro_flac

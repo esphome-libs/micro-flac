@@ -1,6 +1,6 @@
 # WAV to FLAC Converter Example
 
-Converts PCM WAV files to native FLAC using the microFLAC encoder. Supports 8, 16 and 24-bit input in 1-8 channels. Uses fixed predictors (orders 0-4), optionally linear prediction (`--lpc`), and a fixed block size.
+Converts PCM WAV files to native FLAC using the microFLAC encoder. Supports 8, 16, 24 and 32-bit input in 1-8 channels, and shallower depths carried in those widths (a 20-bit stream in 24-bit samples). Uses fixed predictors (orders 0-4), optionally linear prediction (`--lpc`), and a fixed block size.
 
 ## Building
 
@@ -84,13 +84,13 @@ Channel assignment counts: independent=25 left/side=1 right/side=7 mid/side=43
 Uncompressed PCM WAV is accepted:
 
 - **Format**: PCM (format code 1) or WAVE_FORMAT_EXTENSIBLE (format code 0xFFFE) wrapping PCM
-- **Bit depth**: 8, 16 or 24-bit. 8-bit WAV data is unsigned with a 128 bias (RIFF's one exception to signed samples), so its sign bit is flipped on the way in; 16 and 24-bit are signed
+- **Bit depth**: 8, 16, 24 or 32-bit samples. 8-bit WAV data is unsigned with a 128 bias (RIFF's one exception to signed samples), so its sign bit is flipped on the way in; 16, 24 and 32-bit are signed. Shallower depths that use the sample's top byte (17-24 bits in 24-bit samples, 25-32 in 32-bit) come from a WAVE_FORMAT_EXTENSIBLE file's valid bits or a plain PCM file's odd bits per sample, both of which `flac_to_wav` writes; the samples stay left-justified, and the MD5 signature is computed over them right-justified, as RFC 9639 defines it
 - **Channels**: 1 to 8
 - **Byte order**: Little-endian (standard for WAV)
 - **Data size**: a data chunk that claims more than the file holds (a WAV streamed to a pipe declares 0xFFFFFFFF) is read to the end of the file
 
 ## Testing
 
-`test_flac_encoder.py` encodes synthetic and real-audio WAV sources across block sizes, bit depths, channel counts and encoder options, decodes the result with `flac_to_wav` (and `ffmpeg`/`flac` when available), and checks for bit-exact PCM. See the root [README.md](../../README.md#testing) for the command.
+`test_flac_encoder.py` encodes synthetic and real-audio WAV sources across block sizes, bit depths, channel counts and encoder options, decodes the result with `flac_to_wav` (and `ffmpeg`/`flac` when available), and checks for bit-exact PCM. For sources deeper than 24 bits it also recomputes every subframe's residuals from the source samples (with the predictors `flac -a` reports) and checks they stay below 2^31, as RFC 9639 §9.2.7.3 requires: decoders that wrap would decode a stream that breaks that limit correctly, so no round trip can catch it. See the root [README.md](../../README.md#testing) for the command.
 
-The unit tests in `tests/encoder` cover what the round trip cannot reach: `test_bit_writer` covers `src/bit_writer.h`, and `test_encoder_config` covers every call's result codes, the finished stream header, depths WAV cannot carry (4-24 bits) and internal state such as the frame-number limit.
+The unit tests in `tests/encoder` cover what the round trip cannot reach: `test_bit_writer` covers `src/bit_writer.h`, and `test_encoder_config` covers every call's result codes, the finished stream header, depths a plain WAV cannot carry (4-32 bits) and internal state such as the frame-number limit.

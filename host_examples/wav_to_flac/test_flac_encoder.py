@@ -17,6 +17,10 @@ WAV sources and block-size configurations, then verifies each encoded file:
   6. The finished STREAMINFO wav_to_flac writes back over the provisional
      header carries the right total sample count, a fixed block size, and
      plausible minimum/maximum frame sizes.
+  7. For sources deeper than 24 bits, every residual stays below 2^31
+     (RFC 9639 SS9.2.7.3), recomputed from the source samples with each
+     subframe's predictor from `flac -a` (skipped with a note if the flac CLI
+     is missing). Decoders wrap, so no round trip catches a breach.
 
 The stereo-estimation sanity check (L == R input must compress far better
 than forced independent coding) lives in test_encoder_config, which can reach
@@ -79,7 +83,7 @@ MIN_BLOCK_SIZE_FOR_COMPRESSION_CHECK = 192
 
 # Files from the IETF FLAC conformance corpus used as "real audio" sources:
 # the blocksize-variant + fixed-order files in test/flac-test-files/subset
-# (44.1 kHz 16-bit stereo), plus two 24-bit ones.
+# (44.1 kHz 16-bit stereo), plus two 24-bit ones and a 32-bit one.
 REAL_AUDIO_FILES = [
     "01 - blocksize 4096.flac",
     "02 - blocksize 4608.flac",
@@ -92,6 +96,8 @@ REAL_AUDIO_FILES = [
     # push predictors toward overflow
     "28 - high resolution audio, default settings.flac",
     "63 - predictor overflow check, 24-bit.flac",
+    # 32-bit: the only 32-bit stereo file in the corpus (under uncommon/)
+    "../uncommon/05 - 32bps audio.flac",
 ]
 
 BOUND_RE = re.compile(
@@ -172,12 +178,18 @@ def write_wav(path, num_channels, sample_rate, samples):
 
 
 def write_wav_depth(path, num_channels, sample_rate, bits, samples):
-    """Write interleaved PCM at 8, 16 or 24 bits.
+    """Write interleaved PCM at 8, 16, 24 or 32 bits, or at 25-31 bits in
+    32-bit containers.
 
     samples is a sequence of Python ints already in the signed range for
     `bits`. 8-bit WAV PCM is unsigned with a 128 bias (RIFF's one exception to
-    signed samples), so it is re-centered on the way out; 16- and 24-bit are
-    little-endian signed."""
+    signed samples), so it is re-centered on the way out; 16-, 24- and 32-bit
+    are little-endian signed. 25-31 bits go left-justified in 32-bit
+    WAVE_FORMAT_EXTENSIBLE containers."""
+    if 25 <= bits <= 31:
+        raw = b"".join(struct.pack("<i", v << (32 - bits)) for v in samples)
+        write_wav_extensible(path, num_channels, sample_rate, bits, 32, raw)
+        return
     width = bits // 8
     raw = bytearray()
     if bits == 8:
@@ -190,6 +202,9 @@ def write_wav_depth(path, num_channels, sample_rate, bits, samples):
         for v in samples:
             u = v & 0xFFFFFF
             raw += bytes((u & 0xFF, (u >> 8) & 0xFF, (u >> 16) & 0xFF))
+    elif bits == 32:
+        for v in samples:
+            raw += struct.pack("<i", v)
     else:
         raise ValueError(f"unsupported bit depth {bits}")
 
@@ -198,6 +213,30 @@ def write_wav_depth(path, num_channels, sample_rate, bits, samples):
         wf.setsampwidth(width)
         wf.setframerate(sample_rate)
         wf.writeframes(bytes(raw))
+
+
+def write_wav_extensible(path, num_channels, sample_rate, valid_bits, container_bits, raw):
+    """Write a WAVE_FORMAT_EXTENSIBLE PCM file (which the wave module cannot)
+    whose samples carry `valid_bits` of each `container_bits`-bit container"""
+    block_align = num_channels * container_bits // 8
+    fmt = struct.pack(
+        "<HHIIHHHHI",
+        0xFFFE,  # WAVE_FORMAT_EXTENSIBLE
+        num_channels,
+        sample_rate,
+        sample_rate * block_align,
+        block_align,
+        container_bits,
+        22,  # cbSize
+        valid_bits,
+        0,  # channel mask
+    )
+    # KSDATAFORMAT_SUBTYPE_PCM
+    fmt += bytes.fromhex("0100000000001000800000aa00389b71")
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    body += b"data" + struct.pack("<I", len(raw)) + raw + (b"\0" if len(raw) % 2 else b"")
+    with open(path, "wb") as f:
+        f.write(b"RIFF" + struct.pack("<I", len(body)) + body)
 
 
 # ==============================================================================
@@ -399,6 +438,45 @@ def build_depth_channel_sources(out_dir):
     # Constant signals at a wide depth (CONSTANT subframes at bps 24/25).
     add("multi4ch_24b_silence", 4, 24, True, [0] * (n * 4))
 
+    # Depths above 24: 4-byte samples and the 64-bit Pass A, which drops
+    # fixed orders whose residuals reach 2^31 (VERBATIM if none is left)
+    for bits in (25, 28, 31, 32):
+        for ch in (1, 2):
+            add(f"depth{bits}_{ch}ch", ch, bits, True,
+                gen_multichannel(n, ch, bits, RNG_SEED + 70 + bits + ch, True))
+    add("multi6ch_32b", 6, 32, True, gen_multichannel(n, 6, 32, RNG_SEED + 80, True))
+    add("depth29_2ch_noise", 2, 29, False, gen_multichannel(n, 2, 29, RNG_SEED + 81, False))
+    # Full-scale noise including both extremes: no order fits for most
+    # subframes, and INT32_MIN rules out order 0 (|e| must stay below 2^31)
+    rng = random.Random(RNG_SEED + 82)
+    extremes = [-(1 << 31), (1 << 31) - 1]
+    noise32 = [rng.choice(extremes) if i % 97 == 0 else rng.randint(-(1 << 31), (1 << 31) - 1)
+               for i in range(n * 2)]
+    add("depth32_2ch_fullscale_noise", 2, 32, False, noise32)
+    # Anti-phase noise: mid is 0 (CONSTANT) and side = 2L is 33-bit noise
+    # that no order can code, so mid/side carries a 33-bit VERBATIM side
+    rng = random.Random(RNG_SEED + 83)
+    antiphase = []
+    for _ in range(n):
+        v = rng.randint(-(1 << 31) + 1, (1 << 31) - 1)
+        antiphase += [v, -v]
+    add("depth32_2ch_antiphase_noise", 2, 32, False, antiphase)
+    # Anti-phase tone at full scale: a 33-bit side whose warmup samples need
+    # 33 bits while its higher orders stay in range
+    tone = gen_multichannel(n, 1, 32, RNG_SEED + 84, True)
+    add("depth32_2ch_antiphase_tone", 2, 32, True,
+        [x for v in tone for x in (v, -v - 1)])
+    # Full-scale square: every first difference is out of range, order 0 is
+    # not. Order 0 cannot beat VERBATIM at full scale, so no compression check
+    peak32 = (1 << 31) - 1
+    add("depth32_1ch_square", 1, 32, False,
+        [peak32 if (i // 50) % 2 == 0 else -peak32 for i in range(n)])
+    # 31-bit noise shifted left one bit: its side is out of range until the
+    # wasted bit is shifted out
+    rng = random.Random(RNG_SEED + 85)
+    add("depth32_2ch_noise_wasted1", 2, 32, False,
+        [rng.randint(-(1 << 30), (1 << 30) - 1) << 1 for _ in range(n * 2)])
+
     # Wasted bits (FLACEncoderOptions::wasted_bits): shallower audio carried
     # in a deeper container, so every sample of a channel ends in the same
     # zero bits -- 16-bit stereo in 24 bits (mid then codes one bit wider
@@ -421,6 +499,10 @@ def build_depth_channel_sources(out_dir):
         shifted(gen_multichannel(n, 2, 7, RNG_SEED + 62, True), 2, [1, 1]))
     add("multi6ch_24b_wasted", 6, 24, True,
         shifted(gen_multichannel(n, 6, 19, RNG_SEED + 63, True), 6, [0, 1, 2, 3, 4, 5]))
+    add("depth32_2ch_wasted8", 2, 32, True,
+        shifted(gen_multichannel(n, 2, 24, RNG_SEED + 66, True), 2, [8, 8]))
+    add("depth30_1ch_wasted5", 1, 30, True,
+        shifted(gen_multichannel(n, 1, 25, RNG_SEED + 67, True), 1, [5]))
 
     return sources
 
@@ -484,16 +566,16 @@ def build_real_audio_sources(out_dir):
                 except ValueError:
                     pass
 
-        if channels not in (1, 2) or bit_depth not in (16, 24):
+        if channels not in (1, 2) or bit_depth not in (16, 24, 32):
             skipped.append(
                 f"{fname}: unsupported channels={channels} bit_depth={bit_depth} "
-                "(need 16 or 24-bit mono/stereo)"
+                "(need 16, 24 or 32-bit mono/stereo)"
             )
             continue
 
         base = safe_name(Path(fname).stem)
         wav_path = out_dir / f"{base}.wav"
-        codec = "pcm_s24le" if bit_depth == 24 else "pcm_s16le"
+        codec = {16: "pcm_s16le", 24: "pcm_s24le", 32: "pcm_s32le"}[bit_depth]
         cmd = f'ffmpeg -y -i "{flac_path}" -c:a {codec} -f wav "{wav_path}" 2>&1'
         ok, out, _ = run_command(cmd, timeout=60)
         if not ok:
@@ -525,6 +607,7 @@ class CaseResult:
         self.our_md5_ok = None
         self.ffmpeg_pcm_match = None  # None = not checked (ffmpeg missing)
         self.flac_test_ok = None      # None = not checked (flac missing)
+        self.residual_problem = None  # None = in range, or not checked
         self.compression_checked = False
         self.compression_ok = None
         self.passed = None
@@ -591,6 +674,83 @@ def check_streaminfo(flac_path, source, block_size, largest_frame):
     return None
 
 
+# Sources at least this deep get the residual-limit check (#7): shallower
+# ones cannot reach 2^31 with the predictors this encoder writes
+RESIDUAL_LIMIT_MIN_BITS = 25
+RESIDUAL_LIMIT = 1 << 31
+
+
+def read_source_channels(source):
+    """The source WAV's samples as one list of Python ints per channel"""
+    pcm = extract_pcm_from_wav(source.wav_path)
+    width = (source.bits + 7) // 8
+    shift = width * 8 - source.bits
+    if width == 1:
+        values = [(b - 128) >> shift for b in pcm]  # 8-bit WAV is unsigned
+    else:
+        values = [int.from_bytes(pcm[i:i + width], "little", signed=True) >> shift
+                  for i in range(0, len(pcm) - width + 1, width)]
+    return [values[c::source.channels] for c in range(source.channels)]
+
+
+def subframe_residuals(signal, sub):
+    """Exact prediction residuals of one subframe's signal, or [] for
+    CONSTANT and VERBATIM"""
+    if sub["type"] == "FIXED":
+        e = signal
+        for _ in range(sub["order"]):
+            e = [b - a for a, b in zip(e, e[1:])]
+        return e
+    if sub["type"] == "LPC":
+        coeffs, shift, order = sub["coeffs"], sub["shift"], sub["order"]
+        return [signal[i] - (sum(c * signal[i - 1 - j] for j, c in enumerate(coeffs)) >> shift)
+                for i in range(order, len(signal))]
+    return []
+
+
+def check_residual_limit(flac_path, source):
+    """Check #7. Returns None if every residual is in range, else a
+    description of the first that is not."""
+    analysis = DECODED_DIR / f"{flac_path.stem}.ana"
+    ok, _, err = run_command(f'flac -a -s -f -o "{analysis}" "{flac_path}"', timeout=180)
+    if not ok:
+        return f"flac -a failed: {err.strip()[:100]}"
+    channels = read_source_channels(source)
+    frames = []
+    for line in analysis.read_text().splitlines():
+        fields = dict(f.split("=", 1) for f in line.split() if "=" in f)
+        if line.startswith("frame="):
+            frames.append({"n": int(fields["blocksize"]),
+                           "assignment": fields["channel_assignment"], "subframes": []})
+        elif line.startswith("\tsubframe="):
+            frames[-1]["subframes"].append({
+                "type": fields["type"], "wasted": int(fields["wasted_bits"]),
+                "order": int(fields.get("order", 0)),
+                "shift": int(fields.get("quantization_level", 0)), "coeffs": []})
+        elif line.startswith("\t\tqlp_coeff["):
+            frames[-1]["subframes"][-1]["coeffs"].append(int(fields[line.split("=")[0].strip()]))
+    start = 0
+    for index, frame in enumerate(frames):
+        block = [ch[start:start + frame["n"]] for ch in channels]
+        start += frame["n"]
+        for k, sub in enumerate(frame["subframes"]):
+            if len(block) == 2 and frame["assignment"] != "INDEPENDENT":
+                left, right = block
+                side = [l - r for l, r in zip(left, right)]
+                signal = {
+                    "LEFT_SIDE": (left, side), "RIGHT_SIDE": (side, right),
+                    "MID_SIDE": ([(l + r) >> 1 for l, r in zip(left, right)], side),
+                }[frame["assignment"]][k]
+            else:
+                signal = block[k]
+            signal = [v >> sub["wasted"] for v in signal]
+            residuals = subframe_residuals(signal, sub)
+            if residuals and max(max(residuals), -min(residuals)) >= RESIDUAL_LIMIT:
+                return (f"frame {index} subframe {k} ({sub['type']} order {sub['order']}): "
+                        f"residual magnitude reaches 2^31")
+    return None
+
+
 def run_case(source, extra_args, tag, block_size=None):
     """Encode `source` with wav_to_flac using `extra_args`, then run every
     applicable check against the result. `block_size` is the literal
@@ -643,9 +803,9 @@ def run_case(source, extra_args, tag, block_size=None):
     # own sample layout for the byte comparison below to be meaningful: 8-bit
     # WAV data is unsigned, 16/24-bit are little-endian signed.
     if HAVE_FFMPEG:
-        raw_fmt = {8: ("pcm_u8", "u8"), 16: ("pcm_s16le", "s16le"), 24: ("pcm_s24le", "s24le")}[
-            source.bits
-        ]
+        # By container: ffmpeg returns 25-31 bit FLAC left-justified in 32 bits
+        raw_fmt = {8: ("pcm_u8", "u8"), 16: ("pcm_s16le", "s16le"), 24: ("pcm_s24le", "s24le"),
+                   32: ("pcm_s32le", "s32le")}[(source.bits + 7) // 8 * 8]
         raw_out = DECODED_DIR / f"{safe_name(name)}_ffmpeg.raw"
         cmd = (
             f'ffmpeg -y -i "{flac_path}" -c:a {raw_fmt[0]} -f {raw_fmt[1]} "{raw_out}" 2>&1'
@@ -669,6 +829,10 @@ def run_case(source, extra_args, tag, block_size=None):
         cmd = f'flac -t "{flac_path}" 2>&1'
         ok, out, err = run_command(cmd, timeout=180)
         result.flac_test_ok = ok and FLAC_MD5_UNSET_WARNING not in (out + err)
+
+    # Check 7: the residual limit
+    if HAVE_FLAC and source.bits >= RESIDUAL_LIMIT_MIN_BITS:
+        result.residual_problem = check_residual_limit(flac_path, source)
 
     # Check 4: compression sanity for tonal sources (skipped at pathologically
     # small block sizes -- see MIN_BLOCK_SIZE_FOR_COMPRESSION_CHECK)
@@ -697,6 +861,8 @@ def run_case(source, extra_args, tag, block_size=None):
         problems.append("ffmpeg PCM mismatch")
     if HAVE_FLAC and result.flac_test_ok is False:
         problems.append("flac -t failed")
+    if result.residual_problem:
+        problems.append(f"residual limit: {result.residual_problem}")
     if result.compression_checked and result.compression_ok is False:
         problems.append("compression sanity failed (encoded size >= WAV size)")
 
@@ -769,6 +935,7 @@ def generate_report(all_results, skip_notes):
                 "bound_actual": r.bound_actual,
                 "bound_limit": r.bound_limit,
                 "streaminfo_problem": r.streaminfo_problem,
+                "residual_problem": r.residual_problem,
                 "compression_checked": r.compression_checked,
                 "compression_ok": r.compression_ok,
             }
@@ -816,7 +983,7 @@ def main():
     parser.add_argument(
         "--skip-depth-channel",
         action="store_true",
-        help="Skip the bit-depth (8/24-bit) and channel-count (3-8) matrix",
+        help="Skip the bit-depth (8/24/25-32-bit) and channel-count (3-8) matrix",
     )
     parser.add_argument(
         "--skip-lpc",
@@ -877,7 +1044,7 @@ def main():
     if not HAVE_FFMPEG:
         skip_notes.append("ffmpeg not found -- ffmpeg round-trip checks and real-audio sources skipped")
     if not HAVE_FLAC:
-        skip_notes.append("flac CLI not found -- `flac -t` checks skipped")
+        skip_notes.append("flac CLI not found -- `flac -t` and residual-limit checks skipped")
 
     # ------------------------------------------------------------------
     # Build sources
