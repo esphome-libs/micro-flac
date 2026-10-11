@@ -190,7 +190,6 @@ def write_wav_depth(path, num_channels, sample_rate, bits, samples):
         raw = b"".join(struct.pack("<i", v << (32 - bits)) for v in samples)
         write_wav_extensible(path, num_channels, sample_rate, bits, 32, raw)
         return
-    width = bits // 8
     raw = bytearray()
     if bits == 8:
         for v in samples:
@@ -207,12 +206,21 @@ def write_wav_depth(path, num_channels, sample_rate, bits, samples):
             raw += struct.pack("<i", v)
     else:
         raise ValueError(f"unsupported bit depth {bits}")
+    write_wav_pcm(path, num_channels, sample_rate, bits, bytes(raw))
 
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(num_channels)
-        wf.setsampwidth(width)
-        wf.setframerate(sample_rate)
-        wf.writeframes(bytes(raw))
+
+def write_wav_pcm(path, num_channels, sample_rate, bits, raw):
+    """Write a plain PCM file from samples already packed little-endian: the
+    bytes the wave module writes on a little-endian host. wave itself takes
+    native-order frames and byte-swaps them on a big-endian one."""
+    block_align = num_channels * bits // 8
+    fmt = struct.pack(
+        "<HHIIHH", 1, num_channels, sample_rate, sample_rate * block_align, block_align, bits
+    )
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    body += b"data" + struct.pack("<I", len(raw)) + raw
+    with open(path, "wb") as f:
+        f.write(b"RIFF" + struct.pack("<I", len(body)) + body)
 
 
 def write_wav_extensible(path, num_channels, sample_rate, valid_bits, container_bits, raw):
