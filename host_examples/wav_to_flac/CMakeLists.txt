@@ -16,7 +16,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../.. ${CMAKE_CURRENT_BINARY_DIR}/m
 
 # Check the encoder's Pass A overflow proof at run time: its partial sums
 # widen to 64 bits and trap if any passes 32 (sum_chunk_samples() in
-# src/flac_encoder.cpp). An overflow there would not change the encoded
+# src/subframe_coding.h). An overflow there would not change the encoded
 # bytes, so no output comparison can catch it. The round-trip suite drives
 # this build, so it runs checked.
 target_compile_definitions(micro_flac PRIVATE MICRO_FLAC_CHECK_SCAN_SUMS)

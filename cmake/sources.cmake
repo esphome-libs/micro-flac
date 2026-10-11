@@ -19,6 +19,8 @@ function(flac_get_sources SOURCE_DIR)
         # Encoder
         ${SOURCE_DIR}/src/flac_encoder.cpp
         ${SOURCE_DIR}/src/lpc_analysis.cpp
+        ${SOURCE_DIR}/src/rice_partitions.cpp
+        ${SOURCE_DIR}/src/subframe_coding.cpp
         PARENT_SCOPE
     )
 

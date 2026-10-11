@@ -21,14 +21,11 @@
 #include "frame_header.h"
 #include "lpc_analysis.h"
 #include "pcm_packing.h"
-#include "wrapping_arithmetic.h"
+#include "rice_partitions.h"
+#include "subframe_coding.h"
 
 #include <cstdint>
 #include <cstring>
-
-#ifdef MICRO_FLAC_CHECK_SCAN_SUMS
-#include <cstdlib>
-#endif
 
 // Unpacking (pcm_packing.cpp) reads the little-endian input's 2-byte samples
 // as native int16_t and its 3-byte samples as little-endian words.
@@ -47,12 +44,6 @@ namespace {
 // "fLaC", the STREAMINFO block header (4 bytes), then its body
 static_assert(FLACEncoder::HEADER_BYTES == sizeof(MAGIC_BYTES) + 4 + STREAMINFO_SIZE,
               "FLACEncoder::HEADER_BYTES must match the header write_header() emits");
-
-// Deepest stream Pass A scans in 32 bits: an order-o residual is bounded by
-// 2^(bps + o - 1), so the widest subframe, 24-bit stereo's 25-bit side at
-// order 4, stays below 2^28 and its zigzag below 2^29. Deeper streams take
-// scan64().
-constexpr uint32_t MAX_SCAN32_BITS_PER_SAMPLE = 24;
 
 #ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
 // LPC applies to every depth Pass A scans in 32 bits: the deepest such
@@ -102,135 +93,6 @@ uint32_t lpc_precision(uint32_t bits_per_sample, uint32_t block_size) {
 }
 
 #endif  // MICRO_FLAC_ENCODER_DISABLE_LPC
-
-// ============================================================================
-// Rice parameter estimation (Pass A helper)
-// ============================================================================
-
-// floor(log2(sum / n)), capped at RICE_PARAMETER_MAX: the largest k with
-// (n << k) <= sum, or 0. msb(sum) - msb(n) narrows it to two values and one
-// comparison picks, avoiding a 64-bit divide (a libcall on Xtensa).
-uint8_t estimate_rice_k(uint64_t sum, uint32_t n) {
-    if (sum == 0 || n == 0) {
-        return 0;
-    }
-    const int msb_sum = 63 - __builtin_clzll(sum);
-    const int msb_n = 31 - __builtin_clz(n);
-    const int m = msb_sum - msb_n;  // floor(log2(sum / n)) is m or m - 1
-    if (m <= 0) {
-        return 0;  // sum / n < 2, so k = 0 (covers m == 0's both candidates)
-    }
-    if (m > RICE_PARAMETER_MAX) {
-        return RICE_PARAMETER_MAX;  // even m - 1 >= the cap, no need to resolve
-    }
-    // m <= 30 and msb(n) + m <= msb(sum) <= 63, so the shift cannot overflow.
-    return (static_cast<uint64_t>(n) << m) <= sum ? static_cast<uint8_t>(m)
-                                                  : static_cast<uint8_t>(m - 1);
-}
-
-// Zigzag-map a signed residual to unsigned, as write_rice() does. The
-// arithmetic right shift is implementation-defined before C++20; every target
-// here sign-extends.
-FLAC_ALWAYS_INLINE uint32_t zigzag(int32_t r) {
-    const uint32_t low_bit = static_cast<uint32_t>(r) << 1;
-    const uint32_t sign_extended =
-        // cppcheck-suppress shiftTooManyBitsSigned
-        static_cast<uint32_t>(r >> 31);  // NOLINT(readability-magic-numbers)
-    return low_bit ^ sign_extended;
-}
-
-// Bits per Rice parameter for a subframe whose largest is max_k: 4 (coding
-// method 0) while they all fit, else 5 (method 1).
-FLAC_ALWAYS_INLINE uint32_t rice_parameter_bits(uint32_t max_k) {
-    return (max_k > RICE_PARAMETER_MAX_4BIT) ? RICE_PARAMETER_BITS + 1 : RICE_PARAMETER_BITS;
-}
-
-// The residual coding method for `parameter_bits`-bit parameters (RFC 9639 SS9.2.7)
-FLAC_ALWAYS_INLINE void write_coding_method(BitWriterLocal& bw, uint32_t parameter_bits) {
-    write_uint(bw, parameter_bits - RICE_PARAMETER_BITS, RESIDUAL_CODING_METHOD_BITS);
-}
-
-// Size of an n-sample VERBATIM subframe at depth bps (wasted bits aside), the
-// ceiling every other coding must come in under
-FLAC_ALWAYS_INLINE uint64_t verbatim_subframe_bits(uint32_t n, uint32_t bps) {
-    return SUBFRAME_HEADER_BITS + (static_cast<uint64_t>(n) * bps);
-}
-
-// ============================================================================
-// Rice cost estimation (Pass A helper)
-// ============================================================================
-
-// Estimated Rice code bits for `count` residuals whose magnitudes sum to
-// `abs_sum`, at the cheaper of floor(log2(mean)) and the parameter above it
-// (a geometric distribution's optimum lies between them), which goes to k_out.
-//
-// Each code is k + 1 bits plus its quotient. Zigzag maps magnitude m to 2m or
-// 2m - 1, so the quotients sum to about (2 * abs_sum) >> k, less about
-// count / 2 for the bits the shift drops (as in libFLAC's estimator).
-// count * (k + 1) alone exceeds that correction, so it cannot underflow.
-//
-// Callers use the 32-bit overload below whenever the sum fits, which on
-// Xtensa is several times cheaper.
-uint64_t estimate_rice_bits(uint64_t abs_sum, uint32_t count, uint8_t& k_out) {
-    const uint8_t k0 = estimate_rice_k(abs_sum, count);
-    const uint64_t doubled = abs_sum << 1;
-    const uint64_t rounding = count >> 1;
-    const uint64_t bits0 = static_cast<uint64_t>(count) * (k0 + 1U) + (doubled >> k0) - rounding;
-    k_out = k0;
-    if (k0 < RICE_PARAMETER_MAX) {
-        const uint64_t bits1 =
-            static_cast<uint64_t>(count) * (k0 + 2U) + (doubled >> (k0 + 1U)) - rounding;
-        if (bits1 < bits0) {
-            k_out = static_cast<uint8_t>(k0 + 1U);
-            return bits1;
-        }
-    }
-    return bits0;
-}
-
-// The same estimate in 32-bit arithmetic. Nothing overflows: count < 2^16 and
-// k <= 30 keep the k + 1 bits under 2^21, and the quotient term, written as
-// abs_sum >> (k - 1), is under 4 * count (8 when k is capped). At k = 0 the
-// sum is under 2 * count, so doubling it is safe. With m = msb(abs_sum) -
-// msb(count), count << m stays below 2^(msb(abs_sum) + 1) <= 2^32.
-FLAC_ALWAYS_INLINE uint32_t estimate_rice_bits(uint32_t abs_sum, uint32_t count, uint8_t& k_out) {
-    uint32_t k0 = 0;
-    if (abs_sum != 0) {
-        const int m = (31 - __builtin_clz(abs_sum)) - (31 - __builtin_clz(count));
-        if (m > RICE_PARAMETER_MAX) {
-            k0 = RICE_PARAMETER_MAX;
-        } else if (m > 0) {
-            k0 =
-                ((count << m) <= abs_sum) ? static_cast<uint32_t>(m) : static_cast<uint32_t>(m - 1);
-        }
-    }
-    const uint32_t rounding = count >> 1;
-    const uint32_t quotients0 = (k0 == 0) ? (abs_sum << 1) : (abs_sum >> (k0 - 1U));
-    const uint32_t bits0 = count * (k0 + 1U) + quotients0 - rounding;
-    k_out = static_cast<uint8_t>(k0);
-    if (k0 < RICE_PARAMETER_MAX) {
-        const uint32_t bits1 = count * (k0 + 2U) + (abs_sum >> k0) - rounding;
-        if (bits1 < bits0) {
-            k_out = static_cast<uint8_t>(k0 + 1U);
-            return bits1;
-        }
-    }
-    return bits0;
-}
-
-// estimate_rice_bits() in 32-bit arithmetic when the sum allows
-FLAC_ALWAYS_INLINE uint64_t estimate_rice(uint64_t abs_sum, uint32_t count, uint8_t& k) {
-    return ((abs_sum >> 32) == 0) ? estimate_rice_bits(static_cast<uint32_t>(abs_sum), count, k)
-                                  : estimate_rice_bits(abs_sum, count, k);
-}
-
-// ============================================================================
-// Signals and their samples
-// ============================================================================
-
-// A signal a subframe can carry. Mono uses only LEFT; stereo analyzes all
-// four and writes the two its channel assignment needs.
-enum class SignalId : uint8_t { LEFT, RIGHT, MID, SIDE };
 
 // ============================================================================
 // Chunked unpacking
@@ -284,26 +146,6 @@ FLAC_NOINLINE void left_right_to_mid_side_or(int32_t* left_to_mid, int32_t* righ
 // Pass A: per-signal cost analysis
 // ============================================================================
 
-// Pass A's verdict on one signal. Largest members first, so it packs to 16
-// bytes: it is copied through the stereo planner on the hot function's stack.
-struct ChannelAnalysis {
-    uint64_t estimated_bits{0};  // Estimated subframe size, capped at VERBATIM's
-                                 // (see fixed_subframe_bits_bound())
-    bool is_constant{false};
-    bool verbatim{false};  // No fixed order keeps RFC 9639 SS9.2.7.3's residual
-                           // limit (25-32 bit streams only)
-    uint8_t order{0};      // Fixed-predictor order (0-4), unless is_constant or verbatim
-    uint8_t k{0};          // Rice parameter for `order`
-};
-
-// |v| as uint32, defined for INT32_MIN. Written as a compare-and-select
-// because GCC turns it into Xtensa's single ABS instruction; the branchless
-// (v ^ (v >> 31)) - (v >> 31) form costs three instructions, and scan_range()
-// has no registers to spare for them.
-FLAC_ALWAYS_INLINE uint32_t abs_u32(int32_t v) {
-    return (v < 0) ? (0U - static_cast<uint32_t>(v)) : static_cast<uint32_t>(v);
-}
-
 // Pass A's state for one signal, carried across calls so a signal scanned
 // chunk by chunk gets the same result as one whole-block scan.
 //
@@ -352,32 +194,6 @@ FLAC_ALWAYS_INLINE void scan_begin(SignalScan& scan, const int32_t* samples, uin
         scan.prev[o] = prev[o];
     }
 }
-
-// Most samples whose uint32_t partial sums cannot overflow at subframe depth
-// bps. Every |e_o| (o <= 4) is below 2^(bps + 3), so C of them fit in 32 bits
-// when C <= 2^(29 - bps): 1024 up to 19 bits (16-bit stereo's 17-bit side
-// included), 16 for 24-bit stereo's 25-bit side.
-//
-// An overflow would rarely change the output, but it would break
-// fixed_subframe_bits_bound(), which get_max_output_bytes() relies on, so builds
-// defining MICRO_FLAC_CHECK_SCAN_SUMS widen the partials and trap on one.
-constexpr uint32_t MAX_SUM_CHUNK_SAMPLES = 1024;
-FLAC_ALWAYS_INLINE uint32_t sum_chunk_samples(uint32_t bps) {
-    // NOLINTNEXTLINE(readability-magic-numbers) -- C <= 2^(29 - bps), as above
-    return (bps <= 19) ? MAX_SUM_CHUNK_SAMPLES : (1U << (29 - bps));
-}
-
-#ifdef MICRO_FLAC_CHECK_SCAN_SUMS
-using ScanPartial = uint64_t;
-inline void check_scan_partial(uint64_t partial) {
-    if (partial > UINT32_MAX) {
-        std::abort();
-    }
-}
-#else
-using ScanPartial = uint32_t;
-FLAC_ALWAYS_INLINE void check_scan_partial(uint32_t /*partial*/) {}
-#endif
 
 // Continue a scan over samples [i, end), past the warmup, carrying all five
 // orders in one loop. Its 11 live values fit Xtensa's 14 usable registers
@@ -607,6 +423,50 @@ FLAC_COLD_SECTION FLAC_NOINLINE ChannelAnalysis finish_analysis64(const Scan64& 
     return finish_analysis(sums, n, bps - wasted, orders);
 }
 
+// 64-bit Pass A for one channel
+FLAC_COLD_SECTION FLAC_NOINLINE ChannelAnalysis analyze_channel64(const PackedSignal& signal,
+                                                                  bool find_wasted,
+                                                                  uint32_t& wasted) {
+    Scan64 scan{};
+    for (uint32_t start = 0; start < signal.n; start += signal.chunk_len) {
+        const uint32_t m =
+            (signal.n - start > signal.chunk_len) ? signal.chunk_len : (signal.n - start);
+        const int32_t* s = signal.unpack(start, m);
+        scan64(scan, m, [s](uint32_t i) { return static_cast<int64_t>(s[i]); });
+    }
+    return finish_analysis64(scan, signal.n, signal.bps, find_wasted, wasted);
+}
+
+// 64-bit Pass A for stereo: left and right, plus mid and side with
+// `estimate_stereo`. `analyses` and `wasted` are indexed by SignalId.
+FLAC_COLD_SECTION FLAC_NOINLINE void analyze_stereo64(const PackedSignal& base,
+                                                      bool estimate_stereo, bool find_wasted,
+                                                      ChannelAnalysis (&analyses)[4],
+                                                      uint32_t (&wasted)[4]) {
+    Scan64 scans[4] = {};
+    int32_t* const left = base.buf;
+    int32_t* const right = base.buf + base.chunk_len;
+    const size_t frame_bytes = static_cast<size_t>(base.bytes) * 2;
+    for (uint32_t start = 0; start < base.n; start += base.chunk_len) {
+        const uint32_t m = (base.n - start > base.chunk_len) ? base.chunk_len : (base.n - start);
+        unpack_stereo32(left, right, base.input + (start * frame_bytes), m, base.bps);
+        scan64(scans[0], m, [left](uint32_t i) { return static_cast<int64_t>(left[i]); });
+        scan64(scans[1], m, [right](uint32_t i) { return static_cast<int64_t>(right[i]); });
+        if (estimate_stereo) {
+            scan64(scans[2], m, [left, right](uint32_t i) {
+                return (static_cast<int64_t>(left[i]) + right[i]) >> 1;
+            });
+            scan64(scans[3], m,
+                   [left, right](uint32_t i) { return static_cast<int64_t>(left[i]) - right[i]; });
+        }
+    }
+    const uint32_t count = estimate_stereo ? 4 : 2;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t bps = (i == static_cast<uint32_t>(SignalId::SIDE)) ? base.bps + 1 : base.bps;
+        analyses[i] = finish_analysis64(scans[i], base.n, bps, find_wasted, wasted[i]);
+    }
+}
+
 // ============================================================================
 // Pass A: joint-stereo assignment decision
 // ============================================================================
@@ -683,262 +543,8 @@ StereoPlan choose_stereo_plan(const ChannelAnalysis& analysis_l, const ChannelAn
 // Pass B: subframe emission
 // ============================================================================
 
-// Pass B computes fixed residuals with Pass A's difference cascade, in place
-// in each unpacked chunk, which the Rice writer then reads. Fusing the
-// cascade with the bit writer's state would exceed Xtensa's registers.
-
-// The cascade's state: the previous sample and its first three differences
-struct Cascade {
-    int32_t prev_s;
-    int32_t prev_e1;
-    int32_t prev_e2;
-    int32_t prev_e3;
-};
-
-// Consume sample s0 and return its order-ORDER residual. The levels above
-// ORDER are dead, so this folds to ORDER subtractions. They wrap: past 24
-// bits the lower orders may overflow (and a 33-bit side arrives wrapped), but
-// the residual comes out exact, since Pass A picks only orders that fit.
-template <uint8_t ORDER>
-FLAC_ALWAYS_INLINE int32_t cascade_step(int32_t s0, Cascade& c) {
-    const int32_t e1 = wsub32(s0, c.prev_s);
-    const int32_t e2 = wsub32(e1, c.prev_e1);
-    const int32_t e3 = wsub32(e2, c.prev_e2);
-    const int32_t e4 = wsub32(e3, c.prev_e3);
-    c.prev_e3 = e3;
-    c.prev_e2 = e2;
-    c.prev_e1 = e1;
-    c.prev_s = s0;
-    return (ORDER == 0) ? s0 : (ORDER == 1) ? e1 : (ORDER == 2) ? e2 : (ORDER == 3) ? e3 : e4;
-}
-
-// Cascade state for the first order-ORDER residual, at index ORDER: running
-// the cascade over the warmup samples leaves exactly the slots ORDER reads
-// seeded.
-template <uint8_t ORDER>
-FLAC_ALWAYS_INLINE Cascade seed_cascade(const int32_t* samples) {
-    Cascade c{0, 0, 0, 0};
-    for (uint32_t i = 0; i < ORDER; i++) {
-        cascade_step<ORDER>(samples[i], c);
-    }
-    return c;
-}
-
-// ----------------------------------------------------------------------------
-// Reading a subframe's signal
-// ----------------------------------------------------------------------------
-
-// One channel of the packed input, or one of the four stereo candidates. Each
-// chunk is unpacked into chunk_ and turned into residuals in place.
-// Wasted bits are shifted out as it is read: a channel is unpacked as a
-// shallower left-justified depth, and a derived candidate is shifted after
-// its derivation.
-struct PackedSignal {
-    const uint8_t* input;
-    uint32_t n;
-    uint32_t bps;    // The stream's depth, which the input is packed at
-    uint32_t bytes;  // Bytes per packed sample (1-4)
-    uint32_t num_channels;
-    uint32_t channel;  // The channel read when num_channels != 2
-    SignalId sig;      // The candidate derived when num_channels == 2
-    int32_t* buf;      // chunk_; unpack() fills its first chunk_len samples, and the
-                       // stereo search's joint walk unpacks right into the second
-    uint32_t chunk_len;
-    uint32_t wasted;  // Low zero bits shifted out of every sample
-
-    FLAC_ALWAYS_INLINE uint32_t wasted_bits() const {
-        return this->wasted;
-    }
-
-    // Unpack samples [start, start + m) into chunk_ and return them
-    FLAC_NOINLINE int32_t* unpack(uint32_t start, uint32_t m) const {
-        if (FLAC_UNLIKELY(this->bytes == 4)) {
-            return this->unpack32(start, m);
-        }
-        const size_t frame_bytes = static_cast<size_t>(this->bytes) * this->num_channels;
-        const uint8_t* src = this->input + (start * frame_bytes);
-        const uint32_t shift = this->wasted;
-        if (this->num_channels != 2) {
-            unpack_channel(this->buf, src, m, this->channel, this->num_channels, this->bps - shift,
-                           this->bytes);
-            return this->buf;
-        }
-        // Mid and side use left_right_to_mid_side()'s formulas.
-        switch (this->sig) {
-            case SignalId::LEFT:
-            case SignalId::RIGHT: {
-                const uint32_t ch = (this->sig == SignalId::RIGHT) ? 1 : 0;
-                unpack_channel(this->buf, src, m, ch, 2, this->bps - shift, this->bytes);
-                return this->buf;
-            }
-            case SignalId::MID:
-                unpack_mid(this->buf, src, m, this->bps, this->bytes, shift);
-                return this->buf;
-            default:  // SIDE
-                unpack_side(this->buf, src, m, this->bps, this->bytes, shift);
-                return this->buf;
-        }
-    }
-
-    // unpack() for 4-byte samples
-    FLAC_COLD_SECTION FLAC_NOINLINE int32_t* unpack32(uint32_t start, uint32_t m) const {
-        const size_t frame_bytes = static_cast<size_t>(4) * this->num_channels;
-        const uint8_t* src = this->input + (start * frame_bytes);
-        const uint32_t shift = this->wasted;
-        if (this->num_channels != 2) {
-            unpack_channel32(this->buf, src, m, this->channel, this->num_channels,
-                             this->bps - shift);
-        } else if (this->sig == SignalId::MID) {
-            unpack_mid32(this->buf, src, m, this->bps, shift);
-        } else if (this->sig == SignalId::SIDE) {
-            unpack_side32(this->buf, src, m, this->bps, shift);
-        } else {
-            const uint32_t ch = (this->sig == SignalId::RIGHT) ? 1 : 0;
-            unpack_channel32(this->buf, src, m, ch, 2, this->bps - shift);
-        }
-        return this->buf;
-    }
-
-    // Sample i, in 64 bits for a 33-bit side
-    int64_t warmup_sample(uint32_t i) const {
-        const size_t frame_bytes = static_cast<size_t>(this->bytes) * this->num_channels;
-        const uint8_t* frame = this->input + (i * frame_bytes);
-        if (this->num_channels != 2) {
-            return unpack_sample(frame + (static_cast<size_t>(this->bytes) * this->channel),
-                                 this->bps - this->wasted, this->bytes);
-        }
-        const int64_t l = unpack_sample(frame, this->bps, this->bytes);
-        const int64_t r = unpack_sample(frame + this->bytes, this->bps, this->bytes);
-        switch (this->sig) {
-            case SignalId::RIGHT:
-                return r >> this->wasted;
-            case SignalId::MID:
-                return (l + r) >> (1 + this->wasted);
-            case SignalId::SIDE:
-                return (l - r) >> this->wasted;
-            default:  // LEFT
-                return l >> this->wasted;
-        }
-    }
-
-    template <uint8_t ORDER, typename Sink>
-    void residual_chunks(Sink& sink) const {
-        Cascade c{0, 0, 0, 0};
-        for (uint32_t start = 0; start < this->n; start += this->chunk_len) {
-            const uint32_t m =
-                (this->n - start > this->chunk_len) ? this->chunk_len : (this->n - start);
-            int32_t* s = this->unpack(start, m);
-            // The first chunk holds the warmup samples, which seed the
-            // cascade (it is chunk_len >= 4 long, or all n >= ORDER samples).
-            uint32_t j = 0;
-            if (start == 0) {
-                c = seed_cascade<ORDER>(s);
-                j = ORDER;
-            }
-            if (ORDER != 0) {
-                for (uint32_t t = j; t < m; t++) {
-                    s[t] = cascade_step<ORDER>(s[t], c);
-                }
-            }
-            if (m > j) {
-                sink(s + j, m - j);
-            }
-        }
-    }
-};
-
-// Hand `signal`'s order-`order` residuals to `sink`, chunk by chunk.
-template <typename Sink>
-FLAC_ALWAYS_INLINE void for_each_residual_chunk(const PackedSignal& signal, uint8_t order,
-                                                Sink&& sink) {
-    switch (order) {
-        case 0:
-            signal.residual_chunks<0>(sink);
-            break;
-        case 1:
-            signal.residual_chunks<1>(sink);
-            break;
-        case 2:
-            signal.residual_chunks<2>(sink);
-            break;
-        case 3:
-            signal.residual_chunks<3>(sink);
-            break;
-        default:  // 4
-            signal.residual_chunks<4>(sink);
-            break;
-    }
-}
-
-// ----------------------------------------------------------------------------
-// 64-bit Pass A, per frame
-// ----------------------------------------------------------------------------
-
-// 64-bit Pass A for one channel
-FLAC_COLD_SECTION FLAC_NOINLINE ChannelAnalysis analyze_channel64(const PackedSignal& signal,
-                                                                  bool find_wasted,
-                                                                  uint32_t& wasted) {
-    Scan64 scan{};
-    for (uint32_t start = 0; start < signal.n; start += signal.chunk_len) {
-        const uint32_t m =
-            (signal.n - start > signal.chunk_len) ? signal.chunk_len : (signal.n - start);
-        const int32_t* s = signal.unpack(start, m);
-        scan64(scan, m, [s](uint32_t i) { return static_cast<int64_t>(s[i]); });
-    }
-    return finish_analysis64(scan, signal.n, signal.bps, find_wasted, wasted);
-}
-
-// 64-bit Pass A for stereo: left and right, plus mid and side with
-// `estimate_stereo`. `analyses` and `wasted` are indexed by SignalId.
-FLAC_COLD_SECTION FLAC_NOINLINE void analyze_stereo64(const PackedSignal& base,
-                                                      bool estimate_stereo, bool find_wasted,
-                                                      ChannelAnalysis (&analyses)[4],
-                                                      uint32_t (&wasted)[4]) {
-    Scan64 scans[4] = {};
-    int32_t* const left = base.buf;
-    int32_t* const right = base.buf + base.chunk_len;
-    const size_t frame_bytes = static_cast<size_t>(base.bytes) * 2;
-    for (uint32_t start = 0; start < base.n; start += base.chunk_len) {
-        const uint32_t m = (base.n - start > base.chunk_len) ? base.chunk_len : (base.n - start);
-        unpack_stereo32(left, right, base.input + (start * frame_bytes), m, base.bps);
-        scan64(scans[0], m, [left](uint32_t i) { return static_cast<int64_t>(left[i]); });
-        scan64(scans[1], m, [right](uint32_t i) { return static_cast<int64_t>(right[i]); });
-        if (estimate_stereo) {
-            scan64(scans[2], m, [left, right](uint32_t i) {
-                return (static_cast<int64_t>(left[i]) + right[i]) >> 1;
-            });
-            scan64(scans[3], m,
-                   [left, right](uint32_t i) { return static_cast<int64_t>(left[i]) - right[i]; });
-        }
-    }
-    const uint32_t count = estimate_stereo ? 4 : 2;
-    for (uint32_t i = 0; i < count; i++) {
-        const uint32_t bps = (i == static_cast<uint32_t>(SignalId::SIDE)) ? base.bps + 1 : base.bps;
-        analyses[i] = finish_analysis64(scans[i], base.n, bps, find_wasted, wasted[i]);
-    }
-}
-
-// ----------------------------------------------------------------------------
-// Pass B's size bound
-// ----------------------------------------------------------------------------
-//
-// Pass B writes FIXED at Pass A's Rice parameter, deciding FIXED against
-// VERBATIM and proving output capacity from Pass A's sums alone. That rests
-// on a hard bound: a residual costs (zigzag(r) >> k) + k + 1 bits and
-// zigzag(r) <= 2|r|, so c residuals with magnitude sum S cost at most
-// c * (k + 1) + ((2S) >> k). That is estimate_rice_bits() before its c/2
-// rounding correction, so the exact size is at most estimated_bits + c / 2.
-// When that fails to prove FIXED smaller than VERBATIM (near-full-scale
-// noise, or a capped estimate), the exact size decides.
-//
-// That bound for any subframe estimated this way, `order` warmup samples
-// ahead of its residuals
-FLAC_ALWAYS_INLINE uint64_t residual_bits_bound(uint64_t estimated_bits, uint32_t n,
-                                                uint32_t order) {
-    return estimated_bits + ((n - order) >> 1);
-}
-
-// The bound for Pass A's unpartitioned FIXED subframe
+// Pass B's size bound (residual_bits_bound()) for Pass A's unpartitioned
+// FIXED subframe
 FLAC_ALWAYS_INLINE uint64_t fixed_subframe_bits_bound(const ChannelAnalysis& analysis, uint32_t n) {
     return residual_bits_bound(analysis.estimated_bits, n, analysis.order);
 }
@@ -979,56 +585,6 @@ FLAC_ALWAYS_INLINE uint64_t fixed_subframe_budget(const PackedSignal& signal, ui
     return (exact < verbatim_total_bits) ? exact : 0;
 }
 
-// Whether `bits` more bits fit the remaining output, which lets the codes go
-// through the unchecked write_rice_block()
-FLAC_ALWAYS_INLINE bool capacity_for(const BitWriterLocal& bw, uint64_t bits) {
-    const uint64_t bytes = (bw.nbits + bits + 7U) / 8U;
-    return !bw.overflow && bytes <= static_cast<uint64_t>(bw.end - bw.pos);
-}
-
-// Write `count` Rice codes, unchecked when capacity is proven, else checked per code
-FLAC_ALWAYS_INLINE void emit_rice_codes(BitWriterLocal& bw, const int32_t* residuals,
-                                        uint32_t count, uint8_t k, bool capacity_proven) {
-    if (FLAC_LIKELY(capacity_proven)) {
-        write_rice_block(bw, residuals, count, k);
-    } else {
-        for (uint32_t i = 0; i < count; i++) {
-            write_rice(bw, residuals[i], k);
-        }
-    }
-}
-
-// Subframe header (RFC 9639 SS9.2.1, SS9.2.2): the type, the wasted-bits
-// flag, and wasted - 1 in unary. The unary bits are the same for every
-// coding of a signal, so the size estimates leave them out and only the
-// capacity checks add them. The k * n bits wasted bits save cover them, so
-// get_max_output_bytes() still holds.
-FLAC_ALWAYS_INLINE void write_subframe_header(BitWriterLocal& bw, uint8_t type, uint32_t wasted) {
-    write_uint(bw, (static_cast<uint32_t>(type) << 1) | ((wasted != 0) ? 1U : 0U),
-               SUBFRAME_HEADER_BITS);
-    if (wasted != 0) {
-        write_uint(bw, 1, static_cast<uint8_t>(wasted));  // wasted - 1 zeros, then a one
-    }
-}
-
-// Write one sample bps8 (up to 33) bits deep
-FLAC_ALWAYS_INLINE void write_sample(BitWriterLocal& bw, int64_t sample, uint8_t bps8) {
-    const uint64_t bits = static_cast<uint64_t>(sample);
-    if (FLAC_UNLIKELY(bps8 > 32)) {
-        write_uint(bw, static_cast<uint32_t>(bits >> 32), static_cast<uint8_t>(bps8 - 32));
-        bps8 = 32;
-    }
-    write_uint(bw, static_cast<uint32_t>(bits), bps8);
-}
-
-// Write the first `order` samples, a FIXED subframe's warmup
-FLAC_NOINLINE void write_warmup(BitWriterLocal& bw, const PackedSignal& signal, uint32_t order,
-                                uint8_t bps8) {
-    for (uint32_t i = 0; i < order; i++) {
-        write_sample(bw, signal.warmup_sample(i), bps8);
-    }
-}
-
 // VERBATIM subframe: the header, then every sample
 FLAC_NOINLINE void write_verbatim_subframe(BitWriterLocal& bw, const PackedSignal& signal,
                                            uint8_t bps8) {
@@ -1064,311 +620,6 @@ FLAC_NOINLINE void write_constant_subframe(BitWriterLocal& bw, const PackedSigna
     write_subframe_header(bw, SUBFRAME_TYPE_CONSTANT, 0);
     write_sample(bw, signal.warmup_sample(0), bps8);
 }
-
-// FIXED subframe header (RFC 9639 SS9.2.5) through the first Rice parameter
-FLAC_ALWAYS_INLINE void write_fixed_header(BitWriterLocal& bw, const PackedSignal& signal,
-                                           uint8_t bps8, uint8_t order, uint8_t partition_order,
-                                           uint8_t k, uint32_t parameter_bits) {
-    write_subframe_header(bw, static_cast<uint8_t>(SUBFRAME_TYPE_FIXED_MIN + order),
-                          signal.wasted_bits());
-    write_warmup(bw, signal, order, bps8);
-    write_coding_method(bw, parameter_bits);
-    write_uint(bw, partition_order, RICE_PARTITION_ORDER_BITS);
-    write_uint(bw, k, static_cast<uint8_t>(parameter_bits));
-}
-
-// ----------------------------------------------------------------------------
-// Rice partitioning (FLACEncoderOptions::max_rice_partition_order)
-// ----------------------------------------------------------------------------
-//
-// A subframe's residuals can be split into 2^p equal partitions, the first
-// short by the predictor order, each with its own Rice parameter (RFC 9639
-// SS9.2.7). It is chosen after the predictor, in Pass B (or when the stereo
-// search prices its LPC candidates): one walk sums the residual magnitudes
-// per partition at the highest order allowed (the leaves), and
-// choose_partitions() prices every order from those sums, merging neighbors
-// bottom-up as libFLAC does. Pass A is unchanged. The size bound holds
-// partition by partition, so estimate + (n - order) / 2 still bounds the
-// subframe.
-//
-// A subframe that does not split takes the single-partition walks, so with
-// partitioning off, every other option runs the same code.
-
-#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
-constexpr uint32_t MAX_PARTITION_ORDER = FLACEncoder::MAX_RICE_PARTITION_ORDER;
-#else
-constexpr uint32_t MAX_PARTITION_ORDER = 0;
-#endif
-constexpr uint32_t MAX_PARTITIONS = 1U << MAX_PARTITION_ORDER;
-
-// A subframe's Rice coding: 2^order partitions and each one's parameter
-struct RicePartitions {
-    uint8_t order;
-    uint8_t parameter_bits;  // 4, or 5 when any parameter exceeds RICE_PARAMETER_MAX_4BIT
-    uint8_t k[MAX_PARTITIONS];
-};
-
-#ifndef MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
-
-// Highest partition order up to max_order whose partition count divides n
-// and whose first partition keeps a residual
-FLAC_ALWAYS_INLINE uint32_t partition_order_limit(uint32_t n, uint32_t order, uint32_t max_order) {
-    uint32_t p = 0;
-    while (p < max_order && ((n >> (p + 1)) << (p + 1)) == n && (n >> (p + 1)) > order) {
-        p++;
-    }
-    return p;
-}
-
-// Residual magnitude sums per leaf partition, filled by one walk. Positions
-// are sample indices.
-struct LeafSums {
-    uint64_t sum[MAX_PARTITIONS];
-    uint32_t len;    // Samples per leaf
-    uint32_t end;    // Where the current leaf ends
-    uint32_t pos;    // Where the walk stands
-    uint32_t index;  // The current leaf
-};
-
-// Start leaf sums for an n-sample subframe split 2^p ways, walking from `pos`
-FLAC_ALWAYS_INLINE void leaf_sums_begin(LeafSums& sums, uint32_t n, uint32_t p, uint32_t pos) {
-    for (uint32_t i = 0; i < (1U << p); i++) {
-        sums.sum[i] = 0;
-    }
-    sums.len = n >> p;
-    sums.end = sums.len;
-    sums.pos = pos;
-    sums.index = 0;
-}
-
-// Advance to the next leaf at the current one's end, and return how many of
-// the next m positions stay in the leaf
-FLAC_ALWAYS_INLINE uint32_t leaf_step(LeafSums& sums, uint32_t m) {
-    if (sums.pos == sums.end) {
-        sums.index++;
-        sums.end += sums.len;
-    }
-    const uint32_t left = sums.end - sums.pos;
-    return (m < left) ? m : left;
-}
-
-// Choose the cheapest partitioning from leaf sums at order p, merging `sums`
-// in place. Returns the estimated bits of the partition order field,
-// parameters and codes; ties go to the lower order.
-//
-// Any parameter above 14 widens all of them to 5 bits, so when the widest is
-// exactly 15, clamping those partitions to 14 is priced too.
-FLAC_NOINLINE uint64_t choose_partitions(LeafSums& sums, uint32_t n, uint32_t order, uint32_t p,
-                                         RicePartitions& out) {
-    uint64_t best = UINT64_MAX;
-    uint8_t k[MAX_PARTITIONS];
-    for (;;) {
-        const uint32_t parts = 1U << p;
-        const uint32_t len = n >> p;
-        uint64_t bits = RICE_PARTITION_ORDER_BITS;
-        uint32_t max_k = 0;
-        for (uint32_t i = 0; i < parts; i++) {
-            const uint32_t count = (i == 0) ? (len - order) : len;
-            // leaf_sums_begin() zeroed all 2^p leaves; the analyzer cannot
-            // evaluate 1U << p and assumes none
-            // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-            bits += estimate_rice(sums.sum[i], count, k[i]);
-            max_k = (k[i] > max_k) ? k[i] : max_k;
-        }
-        uint32_t parameter_bits = rice_parameter_bits(max_k);
-        if (max_k == RICE_PARAMETER_MAX_4BIT + 1) {
-            uint64_t clamped = bits;
-            for (uint32_t i = 0; i < parts; i++) {
-                if (k[i] == max_k) {
-                    const uint64_t count = (i == 0) ? (len - order) : len;
-                    const uint64_t doubled = sums.sum[i] << 1;
-                    // Both prices share the c/2 rounding correction
-                    clamped += (count * max_k) + (doubled >> (max_k - 1U));
-                    clamped -= (count * (max_k + 1U)) + (doubled >> max_k);
-                }
-            }
-            if (clamped < bits + parts) {  // 4-bit parameters save a bit per partition
-                bits = clamped;
-                parameter_bits = RICE_PARAMETER_BITS;
-                for (uint32_t i = 0; i < parts; i++) {
-                    k[i] = (k[i] == max_k) ? static_cast<uint8_t>(max_k - 1U) : k[i];
-                }
-            }
-        }
-        bits += static_cast<uint64_t>(parts) * parameter_bits;
-        if (bits <= best) {
-            best = bits;
-            out.order = static_cast<uint8_t>(p);
-            out.parameter_bits = static_cast<uint8_t>(parameter_bits);
-            for (uint32_t i = 0; i < parts; i++) {
-                out.k[i] = k[i];
-            }
-        }
-        if (p == 0) {
-            return best;
-        }
-        for (size_t i = 0; i < parts / 2; i++) {
-            sums.sum[i] = sums.sum[2 * i] + sums.sum[(2 * i) + 1];
-        }
-        p--;
-    }
-}
-
-// Where a walk writing a subframe's Rice codes stands among its partitions
-struct RiceEmitter {
-    const RicePartitions* rice;
-    uint32_t len;    // Samples per partition
-    uint32_t end;    // Where the current partition ends
-    uint32_t pos;    // Sample index of the next residual
-    uint32_t index;  // The current partition
-    bool capacity_proven;
-};
-
-// An emitter for a subframe whose header has written the first parameter
-FLAC_ALWAYS_INLINE RiceEmitter rice_emitter(const RicePartitions& rice, uint32_t n, uint32_t order,
-                                            bool capacity_proven) {
-    const uint32_t len = n >> rice.order;
-    return RiceEmitter{&rice, len, len, order, 0, capacity_proven};
-}
-
-// Write the next m residuals' codes, and each later partition's parameter
-// where it starts
-FLAC_NOINLINE void emit_partitioned(BitWriterLocal& bw, RiceEmitter& e, const int32_t* r,
-                                    uint32_t m) {
-    while (m != 0) {
-        if (e.pos == e.end) {
-            e.index++;
-            e.end += e.len;
-            write_uint(bw, e.rice->k[e.index], e.rice->parameter_bits);
-        }
-        const uint32_t left = e.end - e.pos;
-        const uint32_t take = (m < left) ? m : left;
-        emit_rice_codes(bw, r, take, e.rice->k[e.index], e.capacity_proven);
-        r += take;
-        m -= take;
-        e.pos += take;
-    }
-}
-
-// One sink type for the walks below, so they share their signal's
-// residual_chunks() instantiations instead of each adding five
-struct ResidualSink {
-    void (*fn)(void* context, const int32_t* r, uint32_t m);
-    void* context;
-
-    void operator()(const int32_t* r, uint32_t m) const {
-        this->fn(this->context, r, m);
-    }
-};
-
-// add_leaf_residuals() in 64 bits, for subframes deeper than 25 bits, whose
-// residuals may reach 2^31 - 1
-FLAC_COLD_SECTION FLAC_NOINLINE void add_leaf_residuals64(LeafSums& sums, const int32_t* r,
-                                                          uint32_t m) {
-    while (m != 0) {
-        const uint32_t take = leaf_step(sums, m);
-        uint64_t sum = 0;
-        for (uint32_t j = 0; j < take; j++) {
-            sum += abs_u32(r[j]);
-        }
-        sums.sum[sums.index] += sum;
-        r += take;
-        m -= take;
-        sums.pos += take;
-    }
-}
-
-// Add the next m residuals to their leaves' sums, in uint32_t partials of at
-// most sum_chunk_samples(bps)
-FLAC_NOINLINE void add_leaf_residuals(LeafSums& sums, const int32_t* r, uint32_t m, uint32_t bps) {
-    if (FLAC_UNLIKELY(bps > MAX_SCAN32_BITS_PER_SAMPLE + 1)) {
-        add_leaf_residuals64(sums, r, m);
-        return;
-    }
-    const uint32_t run_max = sum_chunk_samples(bps);
-    while (m != 0) {
-        uint32_t take = leaf_step(sums, m);
-        take = (take < run_max) ? take : run_max;
-        ScanPartial partial = 0;
-        for (uint32_t j = 0; j < take; j++) {
-            partial += abs_u32(r[j]);
-        }
-        check_scan_partial(partial);
-        sums.sum[sums.index] += partial;
-        r += take;
-        m -= take;
-        sums.pos += take;
-    }
-}
-
-// Leave the FIXED subframe unpartitioned, at Pass A's parameter and estimate
-FLAC_ALWAYS_INLINE uint64_t unpartitioned_fixed(const ChannelAnalysis& analysis,
-                                                RicePartitions& rice) {
-    rice.order = 0;
-    rice.parameter_bits = static_cast<uint8_t>(rice_parameter_bits(analysis.k));
-    rice.k[0] = analysis.k;
-    return analysis.estimated_bits;
-}
-
-// The partitioning of the FIXED subframe at Pass A's order that Pass B will
-// write, and its estimated size. A split is kept only when its bound proves
-// it smaller than VERBATIM (as write_partitioned_fixed() needs), so LPC is
-// weighed against the FIXED subframe actually written; a dropped split, or a
-// subframe too short to split, leaves analysis.estimated_bits. Out of line so
-// the leaf sums take stack only here.
-FLAC_NOINLINE uint64_t partition_fixed(const PackedSignal& signal, uint32_t bps,
-                                       const ChannelAnalysis& analysis, uint32_t max_order,
-                                       RicePartitions& rice) {
-    const uint32_t n = signal.n;
-    const uint32_t order = analysis.order;
-    const uint32_t p = partition_order_limit(n, order, max_order);
-    if (p == 0 || FLAC_UNLIKELY(analysis.verbatim)) {
-        return unpartitioned_fixed(analysis, rice);  // VERBATIM: left to Pass B's bound
-    }
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) -- leaf_sums_begin() sets it
-    struct Context {
-        LeafSums sums;
-        uint32_t bps;
-    } context;
-    leaf_sums_begin(context.sums, n, p, order);
-    context.bps = bps;
-    const ResidualSink sink{[](void* c, const int32_t* r, uint32_t m) {
-                                Context& x = *static_cast<Context*>(c);
-                                add_leaf_residuals(x.sums, r, m, x.bps);
-                            },
-                            &context};
-    for_each_residual_chunk(signal, analysis.order, sink);
-    const uint64_t bits = SUBFRAME_HEADER_BITS + (static_cast<uint64_t>(order) * bps) +
-                          RESIDUAL_CODING_METHOD_BITS +
-                          choose_partitions(context.sums, n, order, p, rice);
-    if (rice.order != 0 && residual_bits_bound(bits, n, order) >= verbatim_subframe_bits(n, bps)) {
-        return unpartitioned_fixed(analysis, rice);
-    }
-    return bits;
-}
-
-// Write the FIXED subframe partitioned as `rice`, which partition_fixed()
-// kept only when its bound proves it smaller than VERBATIM
-FLAC_NOINLINE void write_partitioned_fixed(BitWriterLocal& bw, const PackedSignal& signal,
-                                           uint32_t bps, uint8_t order, const RicePartitions& rice,
-                                           uint64_t estimated_bits) {
-    const uint32_t n = signal.n;
-    const uint64_t bound = residual_bits_bound(estimated_bits, n, order);
-    struct Context {
-        BitWriterLocal* bw;
-        RiceEmitter emitter;
-    } context{&bw, rice_emitter(rice, n, order, capacity_for(bw, bound + signal.wasted_bits()))};
-    write_fixed_header(bw, signal, static_cast<uint8_t>(bps), order, rice.order, rice.k[0],
-                       rice.parameter_bits);
-    const ResidualSink sink{[](void* c, const int32_t* r, uint32_t m) {
-                                Context& x = *static_cast<Context*>(c);
-                                emit_partitioned(*x.bw, x.emitter, r, m);
-                            },
-                            &context};
-    for_each_residual_chunk(signal, order, sink);
-}
-
-#endif  // MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS
 
 // ----------------------------------------------------------------------------
 // LPC subframes (FLACEncoderOptions::lpc)

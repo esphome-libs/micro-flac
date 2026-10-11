@@ -755,7 +755,7 @@ bool lpc_design(const LpcAutocorrelation& ac, uint32_t bps, uint32_t precision, 
 namespace {
 
 // |v| as unsigned, in the compare-and-select form GCC lowers to Xtensa's
-// one-instruction ABS (see flac_encoder.cpp's abs_u32()).
+// one-instruction ABS (see subframe_coding.h's abs_u32()).
 FLAC_ALWAYS_INLINE uint32_t abs_magnitude(int32_t v) {
     return (v < 0) ? (0U - static_cast<uint32_t>(v)) : static_cast<uint32_t>(v);
 }
