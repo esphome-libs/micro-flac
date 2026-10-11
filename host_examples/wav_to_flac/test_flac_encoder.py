@@ -211,14 +211,15 @@ def write_wav_depth(path, num_channels, sample_rate, bits, samples):
 
 def write_wav_pcm(path, num_channels, sample_rate, bits, raw):
     """Write a plain PCM file from samples already packed little-endian: the
-    bytes the wave module writes on a little-endian host. wave itself takes
-    native-order frames and byte-swaps them on a big-endian one."""
+    bytes the wave module writes on a little-endian host, plus RIFF's pad
+    byte after odd-length data, which wave omits. wave itself takes
+    native-order frames and byte-swaps them on a big-endian host."""
     block_align = num_channels * bits // 8
     fmt = struct.pack(
         "<HHIIHH", 1, num_channels, sample_rate, sample_rate * block_align, block_align, bits
     )
     body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
-    body += b"data" + struct.pack("<I", len(raw)) + raw
+    body += b"data" + struct.pack("<I", len(raw)) + raw + (b"\0" if len(raw) % 2 else b"")
     with open(path, "wb") as f:
         f.write(b"RIFF" + struct.pack("<I", len(body)) + body)
 
