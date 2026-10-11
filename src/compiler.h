@@ -109,11 +109,14 @@
 
 // 1 on little-endian targets, where a native 16- or 32-bit access to packed
 // PCM matches its little-endian byte order. Big-endian targets read and write
-// PCM a byte at a time instead.
-#if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+// PCM a byte at a time instead. MSVC lacks __BYTE_ORDER__, but every target it
+// builds for is little-endian.
+#if defined(__BYTE_ORDER__)
+#define FLAC_LITTLE_ENDIAN (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#elif defined(_MSC_VER)
 #define FLAC_LITTLE_ENDIAN 1
 #else
-#define FLAC_LITTLE_ENDIAN 0
+#error "Cannot determine the target's byte order"
 #endif
 
 // 64-bit little-endian hosts with cheap unaligned 32-bit loads. Xtensa faults
