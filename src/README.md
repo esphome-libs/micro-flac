@@ -34,6 +34,8 @@ Files are named for the FLAC concept they handle. A concept both directions touc
 ### Encoder
 
 - `flac_encoder.cpp` - `FLACEncoder`: stream header, frame assembly, the two-pass predictor and stereo-assignment selection, and subframe encoding (see [Encoding](#encoding) below)
+- `subframe_coding.h` / `subframe_coding.cpp` - What the subframe coders share: `PackedSignal` (a subframe's signal, read from the packed input a chunk at a time), Pass A's `ChannelAnalysis`, the fixed predictors' difference cascade, Rice code estimation and emission, Pass B's size bound, and the subframe header writers
+- `rice_partitions.h` / `rice_partitions.cpp` - Rice partitioning (see [Rice partitioning](#rice-partitioning) below); compiled out with `MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS`
 - `lpc_analysis.h` / `lpc_analysis.cpp` - LPC analysis on `int32_t` sample arrays: windowed autocorrelation, predictor design, and the residual kernel, all in integer arithmetic (see [LPC Subframes](#lpc-subframes) below). Nothing here knows about `PackedSignal` or the bitstream
 
 ### Utilities

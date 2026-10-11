@@ -1123,7 +1123,7 @@ void check_odd_depth_round_trips() {
 
 // Full-scale alternation on every sample: the input that drives Pass A's
 // order-4 partial sums to their proven maximum, 2^32 - 8 * interval at the
-// deepest subframes (sum_chunk_samples() in flac_encoder.cpp). Stereo runs in
+// deepest subframes (sum_chunk_samples() in subframe_coding.h). Stereo runs in
 // phase (side all zero) and in antiphase (side at +/-(2^bits - 1), a full
 // (bits + 1)-bit swing). An overflowed sum would not change the encoded
 // bytes, so the round trip alone cannot catch one; this build defines
