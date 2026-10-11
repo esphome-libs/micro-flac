@@ -565,10 +565,11 @@ int32_t unpack_sample(const uint8_t* p, uint32_t bps, uint32_t bytes) {
 // ----------------------------------------------------------------------------
 //
 // Apart from the 1-3 byte templates: even a compile-time-dead 4-byte branch
-// reschedules their loops. Mid and side are formed in 64 bits.
+// reschedules their loops. Mid and side are formed in 64 bits. Only 25-32 bit
+// streams run these, so they sit in FLAC_COLD_SECTION (compiler.h).
 
-void unpack_channel32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch,
-                      uint32_t num_channels, uint32_t bps) {
+FLAC_COLD_SECTION void unpack_channel32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch,
+                                        uint32_t num_channels, uint32_t bps) {
     const size_t frame_bytes = static_cast<size_t>(4) * num_channels;
     const uint8_t* p = src + (static_cast<size_t>(4) * ch);
     const uint32_t shift = 32 - bps;
@@ -577,7 +578,8 @@ void unpack_channel32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch,
     }
 }
 
-void unpack_stereo32(int32_t* left, int32_t* right, const uint8_t* src, uint32_t n, uint32_t bps) {
+FLAC_COLD_SECTION void unpack_stereo32(int32_t* left, int32_t* right, const uint8_t* src,
+                                       uint32_t n, uint32_t bps) {
     const uint32_t shift = 32 - bps;
     for (uint32_t i = 0; i < n; i++) {
         const uint8_t* p = src + (static_cast<size_t>(i) * 8);
@@ -586,7 +588,8 @@ void unpack_stereo32(int32_t* left, int32_t* right, const uint8_t* src, uint32_t
     }
 }
 
-void unpack_mid32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t wasted) {
+FLAC_COLD_SECTION void unpack_mid32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps,
+                                    uint32_t wasted) {
     const uint32_t shift = 32 - bps;
     for (uint32_t i = 0; i < n; i++) {
         const uint8_t* p = src + (static_cast<size_t>(i) * 8);
@@ -596,7 +599,8 @@ void unpack_mid32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, ui
     }
 }
 
-void unpack_side32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps, uint32_t wasted) {
+FLAC_COLD_SECTION void unpack_side32(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t bps,
+                                     uint32_t wasted) {
     const uint32_t shift = 32 - bps;
     for (uint32_t i = 0; i < n; i++) {
         const uint8_t* p = src + (static_cast<size_t>(i) * 8);
