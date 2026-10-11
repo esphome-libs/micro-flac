@@ -64,8 +64,9 @@ Result: PASS - MD5 signatures match!
 
 The converter produces standard WAV files:
 
-- **8-bit, 16-bit**: PCM format (format code 1)
-- **12-bit, 20-bit, 24-bit, 32-bit**: WAVE_FORMAT_EXTENSIBLE (format code 0xFFFE)
+- **8-bit, 16-bit, 1-2 channels**: PCM format (format code 1)
+- **Everything else**: WAVE_FORMAT_EXTENSIBLE (format code 0xFFFE): 24 and 32-bit output, 3-8 channels, and any depth that doesn't fill its container, stored as valid bits (4-7 bits in 8-bit samples, 12 in 16, 20 in 24)
+- **Signedness**: 1-byte samples (4-8 bit) are unsigned with a 128 bias, as RIFF requires; wider samples are signed
 - **Byte order**: Little-endian (standard for WAV)
 - **Bit alignment**: Non-byte-aligned bit depths are zero-padded in the LSB
 

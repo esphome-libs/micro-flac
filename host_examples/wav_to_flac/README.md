@@ -84,7 +84,7 @@ Channel assignment counts: independent=25 left/side=1 right/side=7 mid/side=43
 Uncompressed PCM WAV is accepted:
 
 - **Format**: PCM (format code 1) or WAVE_FORMAT_EXTENSIBLE (format code 0xFFFE) wrapping PCM
-- **Bit depth**: 8, 16, 24 or 32-bit samples. 8-bit WAV data is unsigned with a 128 bias (RIFF's one exception to signed samples), so its sign bit is flipped on the way in; 16, 24 and 32-bit are signed. Shallower depths that use the sample's top byte (17-24 bits in 24-bit samples, 25-32 in 32-bit) come from a WAVE_FORMAT_EXTENSIBLE file's valid bits or a plain PCM file's odd bits per sample, both of which `flac_to_wav` writes; the samples stay left-justified, and the MD5 signature is computed over them right-justified, as RFC 9639 defines it
+- **Bit depth**: 8, 16, 24 or 32-bit samples. 8-bit WAV data is unsigned with a 128 bias (RIFF's one exception to signed samples), so its sign bit is flipped on the way in; 16, 24 and 32-bit are signed. Shallower depths that use the sample's top byte (4-8 bits in 8-bit samples, 9-16 in 16-bit, 17-24 in 24-bit, 25-32 in 32-bit) come from a WAVE_FORMAT_EXTENSIBLE file's valid bits, as `flac_to_wav` writes them, or a plain PCM file's odd bits per sample; the samples stay left-justified, and the MD5 signature is computed over them right-justified, as RFC 9639 defines it
 - **Channels**: 1 to 8
 - **Byte order**: Little-endian (standard for WAV)
 - **Data size**: a data chunk that claims more than the file holds (a WAV streamed to a pipe declares 0xFFFFFFFF) is read to the end of the file
