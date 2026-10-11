@@ -261,7 +261,9 @@ void write_samples(uint8_t* output_buffer, const int32_t* block_samples, uint32_
     const bool aligned_2 = (reinterpret_cast<uintptr_t>(output_buffer) % 2) == 0;
 
     if (output_32bit) {
-        // 32-bit output mode: all samples output as 4 bytes, left-justified (MSB-aligned)
+        // 32-bit output mode: all samples output as 4 bytes, left-justified (MSB-aligned).
+        // Only the int32_t* decode() overload sets it, whose 4-byte-aligned buffer
+        // takes the native int32_t paths.
         uint32_t shift_amount = 32 - bits_per_sample;
 
         if (aligned_4 && num_channels == 1) {
@@ -276,17 +278,21 @@ void write_samples(uint8_t* output_buffer, const int32_t* block_samples, uint32_
                               num_channels);
         }
     } else {
-        // Native output mode: pack to nearest byte boundary
+        // Native output mode: pack to nearest byte boundary, little-endian
         uint32_t shift_amount = 0;
         if (bits_per_sample % 8 != 0) {
             shift_amount = 8 - (bits_per_sample % 8);
         }
 
-        if (aligned_2 && bits_per_sample == 16 && num_channels == 1) {
+        // The 16-bit and aligned 24-bit paths store native words, which are
+        // little-endian only on a little-endian target
+        const bool native_stores = FLAC_LITTLE_ENDIAN != 0;
+
+        if (native_stores && aligned_2 && bits_per_sample == 16 && num_channels == 1) {
             write_samples_16bit_1ch(output_buffer, block_samples, block_size);
-        } else if (aligned_2 && bits_per_sample == 16 && num_channels == 2) {
+        } else if (native_stores && aligned_2 && bits_per_sample == 16 && num_channels == 2) {
             write_samples_16bit_2ch(output_buffer, block_samples, block_size);
-        } else if (aligned_4 && bits_per_sample == 24 && num_channels == 2) {
+        } else if (native_stores && aligned_4 && bits_per_sample == 24 && num_channels == 2) {
             write_samples_24bit_2ch_aligned(output_buffer, block_samples, block_size);
         } else if (bits_per_sample == 24 && num_channels == 2) {
             write_samples_24bit_2ch(output_buffer, block_samples, block_size);
@@ -317,14 +323,19 @@ FLAC_ALWAYS_INLINE void with_sample_shift(uint32_t bps, Body body) {
 }
 
 // One packed sample, placed at the top of a word and shifted down. 2-byte
-// samples are one aligned 16-bit load; 1- and 3-byte ones are byte loads.
+// samples are one aligned 16-bit load on little-endian targets; everything
+// else is byte loads.
 template <uint32_t BYTES, typename Shift>
 FLAC_ALWAYS_INLINE int32_t read_packed_sample(const uint8_t* p, Shift shift) {
     uint32_t top = 0;
     if (BYTES == 2) {
+#if FLAC_LITTLE_ENDIAN
         top = static_cast<uint32_t>(
                   static_cast<uint16_t>(*reinterpret_cast<const aliased_int16_t*>(p)))
               << 16;
+#else
+        top = (static_cast<uint32_t>(p[1]) << 24) | (static_cast<uint32_t>(p[0]) << 16);
+#endif
     } else {
         top = static_cast<uint32_t>(p[BYTES - 1]) << 24;
         if (BYTES == 3) {
@@ -337,7 +348,12 @@ FLAC_ALWAYS_INLINE int32_t read_packed_sample(const uint8_t* p, Shift shift) {
 // One 4-byte sample, at any alignment, shifted down from the top of the word
 FLAC_ALWAYS_INLINE int32_t read_sample32(const uint8_t* p, uint32_t shift) {
     uint32_t word = 0;
+#if FLAC_LITTLE_ENDIAN
     std::memcpy(&word, p, sizeof(word));
+#else
+    word = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+#endif
     return static_cast<int32_t>(word) >> shift;
 }
 
@@ -353,9 +369,10 @@ FLAC_ALWAYS_INLINE int32_t read_packed_sample_24_load(const uint8_t* p, Shift sh
 }
 #endif
 
-// Deinterleave channel `ch` of `n` frames into `dst`. Aligned 24-bit mono and
-// stereo input is read three words per 12 bytes, as read_stereo() diagrams,
-// at about half the instructions of byte loads.
+// Deinterleave channel `ch` of `n` frames into `dst`. On little-endian
+// targets, aligned 24-bit mono and stereo input is read three words per 12
+// bytes, as read_stereo() diagrams, at about half the instructions of byte
+// loads.
 template <uint32_t BYTES>
 void fill_channel(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch, uint32_t num_channels,
                   uint32_t bps) {
@@ -363,6 +380,7 @@ void fill_channel(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch, uin
     const uint8_t* p = src + (static_cast<size_t>(BYTES) * ch);
     with_sample_shift<BYTES>(bps, [&](auto shift) {
         uint32_t i = 0;
+#if FLAC_LITTLE_ENDIAN
         if (BYTES == 3 && num_channels <= 2 && (reinterpret_cast<uintptr_t>(src) & 3U) == 0) {
             // NOLINTBEGIN(readability-magic-numbers) -- byte lanes per read_stereo()'s layout
             const aliased_uint32_t* w = reinterpret_cast<const aliased_uint32_t*>(src);
@@ -403,6 +421,7 @@ void fill_channel(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch, uin
             }
             // NOLINTEND(readability-magic-numbers)
         }
+#endif
 #ifdef FLAC_FAST_UNALIGNED_LOADS
         if (BYTES == 3) {
             for (; i + 1 < n; i++) {  // Frame i + 1 follows the sample's fourth byte
@@ -418,9 +437,9 @@ void fill_channel(int32_t* dst, const uint8_t* src, uint32_t n, uint32_t ch, uin
 }
 
 // Read both channels of `n` stereo frames in one pass, handing each frame's
-// samples to store(i, left, right). Aligned 24-bit input is read a word at a
-// time, the reverse of write_samples_24bit_2ch_aligned(): two frames are
-// exactly three words,
+// samples to store(i, left, right). On little-endian targets, aligned 24-bit
+// input is read a word at a time, the reverse of
+// write_samples_24bit_2ch_aligned(): two frames are exactly three words,
 //
 //   L0[0] L0[1] L0[2] R0[0]   R0[1] R0[2] L1[0] L1[1]   L1[2] R1[0] R1[1] R1[2]
 //   \------ word0 ------/     \------ word1 ------/     \------ word2 ------/
@@ -431,6 +450,7 @@ template <uint32_t BYTES, typename Store>
 FLAC_ALWAYS_INLINE void read_stereo(const uint8_t* src, uint32_t n, uint32_t bps, Store store) {
     with_sample_shift<BYTES>(bps, [&](auto shift) {
         uint32_t i = 0;
+#if FLAC_LITTLE_ENDIAN
         if (BYTES == 3 && (reinterpret_cast<uintptr_t>(src) & 3U) == 0) {
             // NOLINTBEGIN(readability-magic-numbers) -- byte lanes per the layout above
             const aliased_uint32_t* w = reinterpret_cast<const aliased_uint32_t*>(src);
@@ -447,6 +467,7 @@ FLAC_ALWAYS_INLINE void read_stereo(const uint8_t* src, uint32_t n, uint32_t bps
             }
             // NOLINTEND(readability-magic-numbers)
         }
+#endif
 #ifdef FLAC_FAST_UNALIGNED_LOADS
         if (BYTES == 3) {
             for (; i + 1 < n; i++) {  // Frame i + 1 follows both samples

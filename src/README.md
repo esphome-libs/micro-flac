@@ -218,14 +218,19 @@ Output packing converts the internal planar 32-bit representation to interleaved
 
 - **16-bit mono**: Pointer-cast to `int16_t*`, 4-sample unrolled loop
 - **16-bit stereo**: Pointer-cast to `int16_t*`, 4-sample unrolled loop
+- **24-bit stereo, 4-byte aligned**: Two frames packed into three `uint32_t` stores
 - **24-bit stereo**: Byte-by-byte little-endian packing, 2-sample unrolled loop
 - **General fallback**: Handles all other bit depths and channel counts (non-byte-aligned with LSB zero-padding)
+
+Native output is little-endian on every host. The `int16_t` and `uint32_t` paths store native words, so `write_samples()` takes them only on little-endian targets (`FLAC_LITTLE_ENDIAN`, compiler.h); big-endian targets use the byte-by-byte paths. The encoder's unpacking does the same in reverse: its 16-bit loads, aligned 24-bit word reads and 32-bit `memcpy` loads are little-endian only, and big-endian targets read bytes.
 
 **32-bit output mode** (all samples left-justified to 32 bits):
 
 - **32-bit mono**: Pointer-cast to `int32_t*`, shift in place
 - **32-bit stereo**: Pointer-cast to `int32_t*`, shift-and-interleave
 - **32-bit general**: Handles arbitrary channel counts
+
+32-bit output is native `int32_t` values (only the `int32_t*` `decode()` overload uses it), so it is in the host's byte order.
 
 ## References
 

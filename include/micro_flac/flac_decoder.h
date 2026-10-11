@@ -274,7 +274,8 @@ public:
     /// metadata extraction, and frame decoding internally.
     ///
     /// Output samples use the stream's native byte packing (e.g., 2 bytes for 16-bit,
-    /// 3 bytes for 24-bit). Use the int32_t* overload for uniform 32-bit output.
+    /// 3 bytes for 24-bit), little-endian on every host. Use the int32_t* overload for
+    /// uniform 32-bit output.
     ///
     /// @param input Pointer to input data buffer (must not be null)
     /// @param input_len Number of bytes available in input buffer
@@ -308,6 +309,7 @@ public:
     /// (MSB-aligned) values regardless of the original bit depth. For example, 24-bit
     /// audio is shifted left by 8 bits, 16-bit by 16 bits, etc. This simplifies
     /// downstream processing on embedded devices by providing a uniform sample format.
+    /// The samples are int32_t values, so they are in the host's byte order.
     ///
     /// @param input Pointer to input data buffer (must not be null)
     /// @param input_len Number of bytes available in input buffer

@@ -27,12 +27,6 @@
 #include <cstdint>
 #include <cstring>
 
-// Unpacking (pcm_packing.cpp) reads the little-endian input's 2-byte samples
-// as native int16_t and its 3-byte samples as little-endian words.
-#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
-#error "FLACEncoder requires a little-endian target"
-#endif
-
 namespace micro_flac {
 
 namespace {
@@ -1387,7 +1381,8 @@ FLACEncoderResult FLACEncoder::check_call(const uint8_t* input, size_t input_len
     if (FLAC_UNLIKELY((input == nullptr && input_len != 0) || output == nullptr)) {
         return FLAC_ENCODER_ERROR_INVALID_ARGUMENT;
     }
-    // 2-byte samples are read as int16_t, which faults unaligned on Xtensa
+    // 2-byte samples are read as int16_t on little-endian targets, which faults
+    // unaligned on Xtensa. Every target checks, so the input contract is the same.
     if (FLAC_UNLIKELY(input_len != 0 && this->format_.bytes_per_sample() == 2 &&
                       (reinterpret_cast<uintptr_t>(input) & 1U) != 0)) {
         return FLAC_ENCODER_ERROR_INVALID_ARGUMENT;

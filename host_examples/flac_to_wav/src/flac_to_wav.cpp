@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "file_io.h"
+#include "little_endian.h"
 #include "md5.h"
 #include "micro_flac/flac_decoder.h"
 
@@ -38,6 +39,10 @@ constexpr uint64_t PERCENTAGE_MULTIPLIER = 100;
 // Fixed RIFF bytes preceding the PCM data, excluding the variable fmt chunk body:
 // "WAVE"(4) + "fmt "+size(8) + "data"+size(8).
 constexpr uint32_t WAV_RIFF_FIXED_OVERHEAD = 20;
+constexpr uint32_t WAV_FMT_PCM_SIZE = 16;
+constexpr uint32_t WAV_FMT_EXTENSIBLE_SIZE = 40;
+// "RIFF"+size(8), then the fixed overhead and the largest fmt chunk body
+constexpr size_t WAV_MAX_HEADER_BYTES = 8 + WAV_RIFF_FIXED_OVERHEAD + WAV_FMT_EXTENSIBLE_SIZE;
 }  // namespace
 
 // Pack samples for MD5 computation according to FLAC spec
@@ -86,32 +91,6 @@ static void pack_samples_for_md5(const uint8_t* padded_samples, uint8_t* packed_
     }
 }
 
-struct WAVHeader {
-    char riff[4];              // "RIFF"
-    uint32_t file_size;        // File size - 8
-    char wave[4];              // "WAVE"
-    char fmt[4];               // "fmt "
-    uint32_t fmt_size;         // Format chunk size (16 for PCM, 40 for EXTENSIBLE)
-    uint16_t audio_format;     // Audio format (1 for PCM, 0xFFFE for EXTENSIBLE)
-    uint16_t num_channels;     // Number of channels
-    uint32_t sample_rate;      // Sample rate
-    uint32_t byte_rate;        // Byte rate
-    uint16_t block_align;      // Block align
-    uint16_t bits_per_sample;  // Bits per sample (container size)
-};
-
-struct WAVExtensibleHeader {
-    uint16_t cb_size;                // Size of extension (22)
-    uint16_t valid_bits_per_sample;  // Valid bits in container
-    uint32_t channel_mask;           // Channel position mask
-    uint8_t sub_format[16];          // Format GUID (first 2 bytes are format code)
-};
-
-struct WAVDataChunk {
-    char data[4];        // "data"
-    uint32_t data_size;  // Data chunk size
-};
-
 // WAV/RIFF stores every chunk size in a 32-bit field, so a .wav cannot exceed
 // ~4 GiB. Largest whole-frame PCM data size (bytes) whose value, and the
 // resulting RIFF size (data + non_data_bytes), both fit those 32-bit fields.
@@ -135,13 +114,10 @@ static uint32_t clamp_wav_data_size(uint64_t samples_per_channel, uint32_t num_c
     return (data_size <= max_data) ? static_cast<uint32_t>(data_size) : max_data;
 }
 
-// Returns false if a write fails
+// Writes the RIFF header, every field little-endian. Returns false if a write
+// fails.
 static bool write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_channels,
                              uint16_t bits_per_sample, uint64_t num_samples) {
-    WAVHeader header{};
-    WAVExtensibleHeader ext_header{};
-    WAVDataChunk data_chunk{};
-
     // Calculate container size (round up to byte boundary)
     uint16_t container_bits = static_cast<uint16_t>(((bits_per_sample + 7) / 8) * 8);
     uint32_t bytes_per_sample = container_bits / 8;
@@ -152,28 +128,44 @@ static bool write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_chan
                           (bits_per_sample == BIT_DEPTH_24) || (bits_per_sample == BIT_DEPTH_32) ||
                           (num_channels > 2);
 
-    // RIFF chunk
-    std::memcpy(header.riff, "RIFF", 4);
+    const uint32_t fmt_size = use_extensible ? WAV_FMT_EXTENSIBLE_SIZE : WAV_FMT_PCM_SIZE;
+    const uint32_t non_data_bytes = WAV_RIFF_FIXED_OVERHEAD + fmt_size;
+    const uint32_t data_size =
+        clamp_wav_data_size(num_samples, num_channels, bytes_per_sample, non_data_bytes);
 
-    // WAVE format
-    std::memcpy(header.wave, "WAVE", 4);
+    uint8_t header[WAV_MAX_HEADER_BYTES];
+    size_t size = 0;
+    const auto put_id = [&](const char* id) {
+        std::memcpy(header + size, id, 4);
+        size += 4;
+    };
+    const auto put_u16 = [&](uint16_t value) {
+        store_le16(header + size, value);
+        size += 2;
+    };
+    const auto put_u32 = [&](uint32_t value) {
+        store_le32(header + size, value);
+        size += 4;
+    };
+
+    // RIFF chunk: its size covers "WAVE" and every chunk after it
+    put_id("RIFF");
+    put_u32(non_data_bytes + data_size);
+    put_id("WAVE");
 
     // fmt chunk
-    std::memcpy(header.fmt, "fmt ", 4);
+    put_id("fmt ");
+    put_u32(fmt_size);
+    put_u16(use_extensible ? WAVE_FORMAT_EXTENSIBLE : 1);  // 1: PCM
+    put_u16(num_channels);
+    put_u32(sample_rate);
+    put_u32(sample_rate * num_channels * bytes_per_sample);           // Byte rate
+    put_u16(static_cast<uint16_t>(num_channels * bytes_per_sample));  // Block align
+    put_u16(use_extensible ? container_bits : bits_per_sample);
 
     if (use_extensible) {
-        // Use WAVE_FORMAT_EXTENSIBLE
-        header.fmt_size = 40;  // Extended format
-        header.audio_format = WAVE_FORMAT_EXTENSIBLE;
-        header.num_channels = num_channels;
-        header.sample_rate = sample_rate;
-        header.bits_per_sample = container_bits;
-        header.byte_rate = sample_rate * num_channels * bytes_per_sample;
-        header.block_align = static_cast<uint16_t>(num_channels * bytes_per_sample);
-
-        // Extension
-        ext_header.cb_size = WAV_EXTENSIBLE_CB_SIZE;
-        ext_header.valid_bits_per_sample = bits_per_sample;
+        put_u16(WAV_EXTENSIBLE_CB_SIZE);
+        put_u16(bits_per_sample);  // Valid bits in the container
         // Microsoft channel masks per FLAC spec channel assignments
         // 1: FC, 2: FL+FR, 3: FL+FR+FC, 4: FL+FR+BL+BR,
         // 5: FL+FR+FC+BL+BR, 6: FL+FR+FC+LFE+BL+BR,
@@ -188,38 +180,20 @@ static bool write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_chan
             0x13F,  // 7ch: FL | FR | FC | LFE | BL | BR | BC
             0x63F,  // 8ch: FL | FR | FC | LFE | BL | BR | SL | SR
         };
-        ext_header.channel_mask =
-            (num_channels >= 1 && num_channels <= 8) ? CHANNEL_MASKS[num_channels - 1] : 0;
+        put_u32((num_channels >= 1 && num_channels <= 8) ? CHANNEL_MASKS[num_channels - 1] : 0);
 
         // GUID for PCM: {00000001-0000-0010-8000-00aa00389b71}
         static const uint8_t PCM_GUID[16] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
                                              0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
-        std::memcpy(ext_header.sub_format, PCM_GUID, 16);
-    } else {
-        // Use standard PCM format
-        header.fmt_size = 16;     // PCM format
-        header.audio_format = 1;  // PCM
-        header.num_channels = num_channels;
-        header.sample_rate = sample_rate;
-        header.bits_per_sample = bits_per_sample;
-        header.byte_rate = sample_rate * num_channels * bytes_per_sample;
-        header.block_align = static_cast<uint16_t>(num_channels * bytes_per_sample);
+        std::memcpy(header + size, PCM_GUID, sizeof(PCM_GUID));
+        size += sizeof(PCM_GUID);
     }
 
     // data chunk
-    std::memcpy(data_chunk.data, "data", 4);
-    uint32_t non_data_bytes = WAV_RIFF_FIXED_OVERHEAD + header.fmt_size;
-    data_chunk.data_size =
-        clamp_wav_data_size(num_samples, num_channels, bytes_per_sample, non_data_bytes);
+    put_id("data");
+    put_u32(data_size);
 
-    // Calculate file size
-    uint32_t fmt_chunk_size = 8 + header.fmt_size;            // "fmt " + size + data
-    uint32_t data_chunk_size = 8 + data_chunk.data_size;      // "data" + size + data
-    header.file_size = 4 + fmt_chunk_size + data_chunk_size;  // "WAVE" + chunks
-
-    return write_all(file, &header, sizeof(header)) &&
-           (!use_extensible || write_all(file, &ext_header, sizeof(ext_header))) &&
-           write_all(file, &data_chunk, sizeof(data_chunk));
+    return write_all(file, header, size);
 }
 
 struct Args {
@@ -283,11 +257,14 @@ static bool update_wav_header(const char* output_file, long header_end_pos,
     uint32_t non_data_bytes = static_cast<uint32_t>(header_end_pos) - 8;
     uint32_t data_size = clamp_wav_data_size(samples_per_channel_decoded, num_channels,
                                              bytes_per_sample, non_data_bytes);
-    uint32_t file_size = non_data_bytes + data_size;
+    uint8_t file_size_le[4];
+    uint8_t data_size_le[4];
+    store_le32(file_size_le, non_data_bytes + data_size);
+    store_le32(data_size_le, data_size);
 
-    const bool written = std::fseek(f, 4, SEEK_SET) == 0 && write_all(f, &file_size, 4) &&
+    const bool written = std::fseek(f, 4, SEEK_SET) == 0 && write_all(f, file_size_le, 4) &&
                          std::fseek(f, header_end_pos - 4, SEEK_SET) == 0 &&
-                         write_all(f, &data_size, 4);
+                         write_all(f, data_size_le, 4);
     return close_checked(f) && written;
 }
 
@@ -434,19 +411,20 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
             }
             if (writable > 0) {
                 if (output_32bit) {
-                    if (!write_all(wav_file, output_buffer_32.data(), writable)) {
-                        return false;
+                    // The int32_t* overload's samples are in the host's byte
+                    // order; RIFF's are little-endian
+                    for (uint32_t i = 0; i < writable / 4; i++) {
+                        store_le32(&output_buffer[static_cast<size_t>(i) * 4],
+                                   static_cast<uint32_t>(output_buffer_32[i]));
                     }
-                } else {
-                    if (bits_per_sample == 8) {
-                        for (uint32_t i = 0; i < writable; i++) {
-                            output_buffer[i] =
-                                static_cast<uint8_t>(static_cast<int8_t>(output_buffer[i]) + 128);
-                        }
+                } else if (bits_per_sample == 8) {
+                    for (uint32_t i = 0; i < writable; i++) {
+                        output_buffer[i] =
+                            static_cast<uint8_t>(static_cast<int8_t>(output_buffer[i]) + 128);
                     }
-                    if (!write_all(wav_file, output_buffer.data(), writable)) {
-                        return false;
-                    }
+                }
+                if (!write_all(wav_file, output_buffer.data(), writable)) {
+                    return false;
                 }
             }
             wav_data_bytes_written += writable;
@@ -519,6 +497,7 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                         bytes_per_sample_out = 4;
                         output_buffer_32.resize(output_samples);
                         output_buffer_size = output_samples;
+                        output_buffer.resize(output_samples * 4);  // Little-endian WAV bytes
                     } else {
                         bytes_per_sample_out = stream_info.bytes_per_sample();
                         output_buffer_size = output_samples * bytes_per_sample_out;

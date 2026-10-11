@@ -37,7 +37,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -193,8 +192,9 @@ DecodeRun run_decoder(const std::vector<uint8_t>& stream, size_t chunk_size) {
         if (result == micro_flac::FLAC_DECODER_HEADER_READY) {
             run.header_ready = true;
         } else if (result == micro_flac::FLAC_DECODER_SUCCESS) {
-            int16_t first_sample = 0;
-            std::memcpy(&first_sample, output.data(), sizeof(first_sample));
+            // The uint8_t* output is little-endian on every host
+            const int16_t first_sample =
+                static_cast<int16_t>(static_cast<uint16_t>(output[0] | (output[1] << 8)));
             run.frame_values.push_back(first_sample);
         } else if (result < 0) {
             run.errors.push_back(result);

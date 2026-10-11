@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "file_io.h"      // host_examples/common/include, shared with flac_to_wav
-#include "flac_format.h"  // Channel assignment codes, MAGIC_BYTES, STREAMINFO_SIZE
-#include "md5.h"          // host_examples/common/include, shared with flac_to_wav
+#include "file_io.h"        // host_examples/common/include, shared with flac_to_wav
+#include "flac_format.h"    // Channel assignment codes, MAGIC_BYTES, STREAMINFO_SIZE
+#include "little_endian.h"  // host_examples/common/include, shared with flac_to_wav
+#include "md5.h"            // host_examples/common/include, shared with flac_to_wav
 #include "micro_flac/flac_encoder.h"
 #include "micro_flac/pcm_format.h"
 
@@ -49,6 +50,15 @@ constexpr size_t WAVE_FORMAT_EXTENSIBLE_MIN_SIZE = 40;
 // Minimal WAV reader (8/16/24/32-bit PCM containers, 1-8 channels)
 // ============================================================================
 
+// Reads one little-endian RIFF size field. Returns false if the file ends or
+// fails first.
+bool read_le32(FILE* f, uint32_t& value) {
+    uint8_t bytes[4] = {};
+    const bool complete = std::fread(bytes, 1, 4, f) == 4;
+    value = load_le32(bytes);
+    return complete;
+}
+
 struct WavInfo {
     uint32_t sample_rate{0};
     uint16_t num_channels{0};
@@ -75,7 +85,7 @@ bool read_wav_header(FILE* f, WavInfo& info) {
     if (std::fread(riff_id, 1, 4, f) != 4 || std::memcmp(riff_id, "RIFF", 4) != 0) {
         return false;
     }
-    if (std::fread(&riff_size, 4, 1, f) != 1) {
+    if (!read_le32(f, riff_size)) {
         return false;
     }
     if (std::fread(wave_id, 1, 4, f) != 4 || std::memcmp(wave_id, "WAVE", 4) != 0) {
@@ -92,7 +102,7 @@ bool read_wav_header(FILE* f, WavInfo& info) {
         if (std::fread(chunk_id, 1, 4, f) != 4) {
             break;
         }
-        if (std::fread(&chunk_size, 4, 1, f) != 1) {
+        if (!read_le32(f, chunk_size)) {
             break;
         }
         const uint32_t pad = (chunk_size % 2 != 0) ? 1 : 0;
@@ -125,10 +135,7 @@ bool read_wav_header(FILE* f, WavInfo& info) {
                 static_cast<uint16_t>(fmt_buf[0] | (static_cast<uint16_t>(fmt_buf[1]) << 8));
             info.num_channels =
                 static_cast<uint16_t>(fmt_buf[2] | (static_cast<uint16_t>(fmt_buf[3]) << 8));
-            info.sample_rate = static_cast<uint32_t>(fmt_buf[4]) |
-                               (static_cast<uint32_t>(fmt_buf[5]) << 8) |
-                               (static_cast<uint32_t>(fmt_buf[6]) << 16) |
-                               (static_cast<uint32_t>(fmt_buf[7]) << 24);
+            info.sample_rate = load_le32(fmt_buf + 4);
             info.bits_per_sample =
                 static_cast<uint16_t>(fmt_buf[14] | (static_cast<uint16_t>(fmt_buf[15]) << 8));
             info.container_bits = static_cast<uint16_t>(((info.bits_per_sample + 7U) / 8U) * 8U);
