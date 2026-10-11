@@ -417,7 +417,9 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                         store_le32(&output_buffer[static_cast<size_t>(i) * 4],
                                    static_cast<uint32_t>(output_buffer_32[i]));
                     }
-                } else if (bits_per_sample == 8) {
+                } else if (bytes_per_sample_out == 1) {
+                    // 1-byte WAV PCM is unsigned (RIFF's one exception), whatever
+                    // its valid bit count, so 4-7 bit streams need the bias too
                     for (uint32_t i = 0; i < writable; i++) {
                         output_buffer[i] =
                             static_cast<uint8_t>(static_cast<int8_t>(output_buffer[i]) + 128);
