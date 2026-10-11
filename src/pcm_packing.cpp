@@ -262,7 +262,8 @@ void write_samples(uint8_t* output_buffer, const int32_t* block_samples, uint32_
 
     if (output_32bit) {
         // 32-bit output mode: all samples output as 4 bytes, left-justified (MSB-aligned).
-        // Only the int32_t* decode() overload sets it, so samples are native int32_t.
+        // Only the int32_t* decode() overload sets it, whose 4-byte-aligned buffer
+        // takes the native int32_t paths.
         uint32_t shift_amount = 32 - bits_per_sample;
 
         if (aligned_4 && num_channels == 1) {

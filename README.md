@@ -175,8 +175,8 @@ cmake -B build && cmake --build build
 
 | Method | Description |
 | ------ | ----------- |
-| `decode(input, len, uint8_t* output, output_size_bytes, bytes_consumed, samples_decoded)` | Decode with native byte packing (e.g., 2 bytes for 16-bit, 3 for 24-bit). `output_size_bytes` in bytes (`max_block_size * channels * bytes_per_sample`). |
-| `decode(input, len, int32_t* output, output_size_samples, bytes_consumed, samples_decoded)` | Decode with 32-bit left-justified output (all bit depths → 4 bytes). `output_size_samples` in samples (`max_block_size * channels` or `get_output_buffer_size_samples()`). |
+| `decode(input, len, uint8_t* output, output_size_bytes, bytes_consumed, samples_decoded)` | Decode with native byte packing (e.g., 2 bytes for 16-bit, 3 for 24-bit), little-endian on every host. `output_size_bytes` in bytes (`max_block_size * channels * bytes_per_sample`). |
+| `decode(input, len, int32_t* output, output_size_samples, bytes_consumed, samples_decoded)` | Decode with 32-bit left-justified output (all bit depths → 4 bytes), as `int32_t` in the host's byte order. `output_size_samples` in samples (`max_block_size * channels` or `get_output_buffer_size_samples()`). |
 | `get_stream_info()` | Get stream info struct (sample rate, channels, bit depth, etc.) after HEADER_READY. Use `get_stream_info().is_valid()` to check if parsed. |
 | `get_output_buffer_size_samples()` | Get required output buffer size in samples (max_block_size * num_channels) |
 | `reset()` | Reset decoder state for decoding a new stream (preserves configuration) |

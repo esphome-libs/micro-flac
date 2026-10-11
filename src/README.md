@@ -222,7 +222,7 @@ Output packing converts the internal planar 32-bit representation to interleaved
 - **24-bit stereo**: Byte-by-byte little-endian packing, 2-sample unrolled loop
 - **General fallback**: Handles all other bit depths and channel counts (non-byte-aligned with LSB zero-padding)
 
-Native output is little-endian on every host. The `int16_t` and `uint32_t` paths store native words, so `write_samples()` takes them only on little-endian targets (`FLAC_LITTLE_ENDIAN`, compiler.h); big-endian targets use the byte-by-byte paths. The encoder's unpacking does the same in reverse: its 16-bit loads and aligned 24-bit word reads are little-endian only, and big-endian targets read bytes.
+Native output is little-endian on every host. The `int16_t` and `uint32_t` paths store native words, so `write_samples()` takes them only on little-endian targets (`FLAC_LITTLE_ENDIAN`, compiler.h); big-endian targets use the byte-by-byte paths. The encoder's unpacking does the same in reverse: its 16-bit loads, aligned 24-bit word reads and 32-bit `memcpy` loads are little-endian only, and big-endian targets read bytes.
 
 **32-bit output mode** (all samples left-justified to 32 bits):
 
