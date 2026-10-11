@@ -28,8 +28,6 @@ using namespace micro_flac;
 
 // Named constants to avoid magic numbers
 namespace {
-constexpr uint16_t BIT_DEPTH_12 = 12;
-constexpr uint16_t BIT_DEPTH_20 = 20;
 constexpr uint16_t BIT_DEPTH_24 = 24;
 constexpr uint16_t BIT_DEPTH_32 = 32;
 constexpr uint16_t WAVE_FORMAT_EXTENSIBLE = 0xFFFE;
@@ -122,11 +120,11 @@ static bool write_wav_header(FILE* file, uint32_t sample_rate, uint16_t num_chan
     uint16_t container_bits = static_cast<uint16_t>(((bits_per_sample + 7) / 8) * 8);
     uint32_t bytes_per_sample = container_bits / 8;
 
-    // Determine if we need WAVE_FORMAT_EXTENSIBLE
-    // Use extensible format for non-standard bit depths or high bit depths
-    bool use_extensible = (bits_per_sample == BIT_DEPTH_12) || (bits_per_sample == BIT_DEPTH_20) ||
-                          (bits_per_sample == BIT_DEPTH_24) || (bits_per_sample == BIT_DEPTH_32) ||
-                          (num_channels > 2);
+    // Use WAVE_FORMAT_EXTENSIBLE for high bit depths, more than two channels,
+    // and any depth that doesn't fill its container: plain PCM has no
+    // valid-bits field
+    bool use_extensible = (bits_per_sample != container_bits) ||
+                          (bits_per_sample >= BIT_DEPTH_24) || (num_channels > 2);
 
     const uint32_t fmt_size = use_extensible ? WAV_FMT_EXTENSIBLE_SIZE : WAV_FMT_PCM_SIZE;
     const uint32_t non_data_bytes = WAV_RIFF_FIXED_OVERHEAD + fmt_size;
@@ -417,7 +415,9 @@ int main(int argc, char* argv[]) {  // NOLINT(bugprone-exception-escape)
                         store_le32(&output_buffer[static_cast<size_t>(i) * 4],
                                    static_cast<uint32_t>(output_buffer_32[i]));
                     }
-                } else if (bits_per_sample == 8) {
+                } else if (bytes_per_sample_out == 1) {
+                    // 1-byte WAV PCM is unsigned (RIFF's one exception), whatever
+                    // its valid bit count, so 4-7 bit streams need the bias too
                     for (uint32_t i = 0; i < writable; i++) {
                         output_buffer[i] =
                             static_cast<uint8_t>(static_cast<int8_t>(output_buffer[i]) + 128);

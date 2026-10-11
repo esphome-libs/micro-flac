@@ -527,8 +527,8 @@ def test_32bit_file(flac_file):
 
     for i in range(num_samples):
         # Read native sample
-        if bit_depth == 8:
-            # 8-bit WAV is unsigned (0-255), convert to signed for comparison
+        if native_bytes == 1:
+            # 1-byte WAV is unsigned (0-255) at any bit depth, convert to signed for comparison
             native_val = pcm_native[i] - 128
         else:
             native_val = int.from_bytes(
