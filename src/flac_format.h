@@ -42,6 +42,9 @@ static constexpr size_t STREAMINFO_SIZE = 34;
 /// @brief Shallowest bit depth a stream can have (Section 8.2)
 static constexpr uint32_t MIN_BITS_PER_SAMPLE = 4;
 
+/// @brief Deepest bit depth a stream can have (Section 8.2)
+static constexpr uint32_t MAX_BITS_PER_SAMPLE = 32;
+
 /// @brief Largest value of STREAMINFO's 36-bit total-samples field
 static constexpr uint64_t TOTAL_SAMPLES_MAX = (1ULL << 36) - 1;
 

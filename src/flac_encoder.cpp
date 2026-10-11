@@ -48,9 +48,6 @@ namespace {
 static_assert(FLACEncoder::HEADER_BYTES == sizeof(MAGIC_BYTES) + 4 + STREAMINFO_SIZE,
               "FLACEncoder::HEADER_BYTES must match the header write_header() emits");
 
-// Deepest supported stream (the shallowest is the format's, MIN_BITS_PER_SAMPLE).
-constexpr uint32_t MAX_BITS_PER_SAMPLE = 32;
-
 // Deepest stream Pass A scans in 32 bits: an order-o residual is bounded by
 // 2^(bps + o - 1), so the widest subframe, 24-bit stereo's 25-bit side at
 // order 4, stays below 2^28 and its zigzag below 2^29. Deeper streams take
