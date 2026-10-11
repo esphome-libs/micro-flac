@@ -68,7 +68,7 @@ cmake -B build && cmake --build build
 python3 test_flac_encoder.py                            # Encoder round-trip/reference test suite
 python3 test_flac_encoder.py --block-sizes 16,192,4096   # Custom block sizes
 python3 test_flac_encoder.py --skip-real-audio           # Synthetic sources only, no test corpus decode
-python3 test_flac_encoder.py --skip-depth-channel        # Skip the 8/24/25-32-bit and 3-8 channel matrix
+python3 test_flac_encoder.py --skip-depth-channel        # Skip the 4-8/24/25-32-bit and 3-8 channel matrix
 python3 test_flac_encoder.py --skip-lpc --skip-partitions  # Skip the LPC and Rice partitioning passes
 ```
 

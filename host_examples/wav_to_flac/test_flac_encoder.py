@@ -178,14 +178,18 @@ def write_wav(path, num_channels, sample_rate, samples):
 
 
 def write_wav_depth(path, num_channels, sample_rate, bits, samples):
-    """Write interleaved PCM at 8, 16, 24 or 32 bits, or at 25-31 bits in
-    32-bit containers.
+    """Write interleaved PCM at 8, 16, 24 or 32 bits, or at 4-7 and 25-31
+    bits in 8- and 32-bit containers.
 
     samples is a sequence of Python ints already in the signed range for
-    `bits`. 8-bit WAV PCM is unsigned with a 128 bias (RIFF's one exception to
-    signed samples), so it is re-centered on the way out; 16-, 24- and 32-bit
-    are little-endian signed. 25-31 bits go left-justified in 32-bit
+    `bits`. 1-byte WAV PCM is unsigned with a 128 bias (RIFF's one exception
+    to signed samples), so it is re-centered on the way out; 16-, 24- and
+    32-bit are little-endian signed. 4-7 and 25-31 bits go left-justified in
     WAVE_FORMAT_EXTENSIBLE containers."""
+    if bits < 8:
+        raw = bytes(((v << (8 - bits)) + 128) & 0xFF for v in samples)
+        write_wav_extensible(path, num_channels, sample_rate, bits, 8, raw)
+        return
     if 25 <= bits <= 31:
         raw = b"".join(struct.pack("<i", v << (32 - bits)) for v in samples)
         write_wav_extensible(path, num_channels, sample_rate, bits, 32, raw)
@@ -405,7 +409,7 @@ def gen_multichannel(n, channels, bits, seed, tonal, sample_rate=SAMPLE_RATE):
 
 def build_depth_channel_sources(out_dir):
     """Bit-depth and channel-count coverage beyond 16-bit mono and stereo:
-    8-bit (1-byte samples), 24-bit (3-byte samples, and the shortest Pass A
+    4-8 bit (1-byte samples), 24-bit (3-byte samples, and the shortest Pass A
     spill intervals), and channel counts from 3 to the format's maximum of 8."""
     out_dir.mkdir(parents=True, exist_ok=True)
     sources = []
@@ -416,8 +420,10 @@ def build_depth_channel_sources(out_dir):
         write_wav_depth(path, channels, SAMPLE_RATE, bits, samples)
         sources.append(SourceSpec(name, channels, tonal, path, bits))
 
-    # Depths below 16: 1-byte packed samples.
-    for bits in (8,):
+    # Depths below 16: 1-byte packed samples. 4-7 bits are the only coverage
+    # of flac_to_wav's unsigned bias for sub-8-bit streams: the decoder
+    # corpus has none, and the flac CLI cannot encode them.
+    for bits in (4, 7, 8):
         for ch in (1, 2):
             add(f"depth{bits}_{ch}ch", ch, bits, True,
                 gen_multichannel(n, ch, bits, RNG_SEED + 10 + ch, True))
@@ -992,7 +998,7 @@ def main():
     parser.add_argument(
         "--skip-depth-channel",
         action="store_true",
-        help="Skip the bit-depth (8/24/25-32-bit) and channel-count (3-8) matrix",
+        help="Skip the bit-depth (4-8/24/25-32-bit) and channel-count (3-8) matrix",
     )
     parser.add_argument(
         "--skip-lpc",
