@@ -91,12 +91,12 @@ The benchmark runs each chunk size first with CRC disabled, then with CRC enable
                                 CRC Disabled           CRC Enabled
   Test Case              Time (ms) Real-time   Time (ms) Real-time
   --------------------  ---------- ---------  ---------- ---------
-  Full frame                918.26     32.7x      991.73     30.3x
-  1000 byte chunks          922.81     32.5x      997.24     30.1x
-  500 byte chunks           928.47     32.3x     1003.55     29.9x
-  100 byte chunks           975.27     30.8x     1053.93     28.5x
-  4 byte chunks            2373.16     12.6x     2527.86     11.9x
-  1 byte chunks            6935.53      4.3x     7296.88      4.1x
+  Full frame                918.44     32.7x      997.20     30.1x
+  1000 byte chunks          922.85     32.5x     1001.53     30.0x
+  500 byte chunks           929.05     32.3x     1008.20     29.8x
+  100 byte chunks           976.01     30.7x     1058.59     28.3x
+  4 byte chunks            2381.82     12.6x     2539.50     11.8x
+  1 byte chunks            6971.44      4.3x     7335.52      4.1x
 ```
 
 ### ESP32-S3 @ 240 MHz (24-bit/48 kHz stereo, 30 seconds, packed 24-bit output)
@@ -109,12 +109,12 @@ The benchmark runs each chunk size first with CRC disabled, then with CRC enable
                                 CRC Disabled           CRC Enabled
   Test Case              Time (ms) Real-time   Time (ms) Real-time
   --------------------  ---------- ---------  ---------- ---------
-  Full frame               1385.14     21.7x     1550.19     19.4x
-  1000 byte chunks         1396.60     21.5x     1560.53     19.2x
-  500 byte chunks          1409.14     21.3x     1574.06     19.1x
-  100 byte chunks          1510.16     19.9x     1682.95     17.8x
-  4 byte chunks            4580.11      6.6x     4919.77      6.1x
-  1 byte chunks           14542.14      2.1x    15336.69      2.0x
+  Full frame               1385.12     21.7x     1550.97     19.3x
+  1000 byte chunks         1396.87     21.5x     1561.39     19.2x
+  500 byte chunks          1409.57     21.3x     1575.18     19.0x
+  100 byte chunks          1511.05     19.9x     1684.76     17.8x
+  4 byte chunks            4599.14      6.5x     4939.39      6.1x
+  1 byte chunks           14618.28      2.1x    15413.56      1.9x
 ```
 
 ### ESP32-S3 @ 240 MHz (24-bit/48 kHz stereo, 30 seconds, 32-bit output)
@@ -127,12 +127,12 @@ The benchmark runs each chunk size first with CRC disabled, then with CRC enable
                                 CRC Disabled           CRC Enabled
   Test Case              Time (ms) Real-time   Time (ms) Real-time
   --------------------  ---------- ---------  ---------- ---------
-  Full frame               1364.75     22.0x     1531.08     19.6x
-  1000 byte chunks         1376.54     21.8x     1541.01     19.5x
-  500 byte chunks          1389.18     21.6x     1554.69     19.3x
-  100 byte chunks          1489.55     20.1x     1662.72     18.0x
-  4 byte chunks            4538.67      6.6x     4878.53      6.1x
-  1 byte chunks           14435.03      2.1x    15229.60      2.0x
+  Full frame               1365.12     22.0x     1532.06     19.6x
+  1000 byte chunks         1377.01     21.8x     1542.12     19.5x
+  500 byte chunks          1389.84     21.6x     1555.80     19.3x
+  100 byte chunks          1490.52     20.1x     1664.45     18.0x
+  4 byte chunks            4552.48      6.6x     4892.73      6.1x
+  1 byte chunks           14489.41      2.1x    15284.61      2.0x
 ```
 
 Streaming with chunks of 100 bytes or larger has negligible overhead compared to full-frame decoding. CRC checking adds roughly ~8% overhead for 16-bit and ~12% for 24-bit audio.
@@ -143,7 +143,7 @@ Streaming with chunks of 100 bytes or larger has negligible overhead compared to
 
 RTF = decode_time / audio_duration
 
-- **RTF < 1.0**: Faster than real-time (good)
+- **RTF < 1.0**: Faster than real-time
 - **RTF = 1.0**: Exactly real-time
 - **RTF > 1.0**: Slower than real-time (cannot stream)
 

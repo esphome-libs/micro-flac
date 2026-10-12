@@ -77,7 +77,7 @@ enum FLACEncoderResult : int8_t {
     FLAC_ENCODER_ERROR_STREAM_TOO_LONG = -5    // Next frame number would exceed 2^31 - 1
 };
 
-/// @brief Compression settings, fixed at construction
+/// @brief Compression settings, fixed until reset(format, options)
 ///
 /// Every field's default works for any format.
 struct FLACEncoderOptions {
@@ -100,8 +100,9 @@ struct FLACEncoderOptions {
 
     /// With `lpc` on a stereo stream, design LPC for all four candidate
     /// signals (left, right, mid, side) before choosing the channel
-    /// assignment, instead of choosing from the fixed predictors. About
-    /// 0.05-0.25% smaller, for about 40% more encode time on an ESP32-S3.
+    /// assignment, instead of choosing from the fixed predictors. Typically
+    /// 0.05-0.25% smaller (up to about 0.5%), for about 40% more encode time
+    /// on an ESP32-S3.
     bool lpc_stereo_search{false};
 
     /// Largest Rice partition order tried, in [0,

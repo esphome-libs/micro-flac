@@ -14,7 +14,7 @@ Measures FLAC encoding performance on ESP32-S3 and ESP32-P4. Decodes the embedde
 - Real-Time Factor (RTF) and realtime multiple per test case
 - Achieved bytes/sample, bits/sample, and compression ratio vs. the input PCM
 - Channel assignment histogram (independent / left-side / right-side / mid-side)
-- Combined summary table for easy comparison
+- Combined summary table of every case
 
 ## Test Signal
 
@@ -55,27 +55,27 @@ The benchmark runs each test case in turn and prints a combined summary table at
 
   Test Case              Time (ms)     Real-time   Bytes/smp       Ratio
   --------------------  ----------  ------------  ----------  ----------
-  4096 (large)            11266.40         21.3x       0.879      2.276x
-  1152 (typical)          11494.50         20.9x       0.878      2.277x
-  576 (small)             11801.32         20.3x       0.887      2.255x
-  192 (tiny)              12855.32         18.7x       0.925      2.163x
-  LPC-4 4096              21249.30         11.3x       0.838      2.386x
-  LPC-8 4096              26477.51          9.0x       0.836      2.392x
-  LPC-8 1152              25892.37          9.3x       0.841      2.379x
-  LPC-12 4096             29648.38          8.1x       0.836      2.392x
-  LPC-8 search 4096       37174.39          6.4x       0.833      2.401x
-  LPC-8 search 1152       36336.99          6.6x       0.838      2.387x
-  4096 r6                 13401.68         17.9x       0.874      2.290x
-  1152 r6                 14417.87         16.6x       0.878      2.278x
-  LPC-8 r6 4096           29176.26          8.2x       0.830      2.411x
-  LPC-8 search r6 4096    40374.28          5.9x       0.828      2.417x
-  24b 4096 (large)        15047.86         15.9x       1.880      1.596x
-  24b 1152 (typical)      15276.88         15.7x       1.879      1.596x
-  24b 4096 r6             17707.02         13.5x       1.874      1.601x
-  24b LPC-8 4096          57844.81          4.1x       1.836      1.634x
-  24b mono 4096            6045.64         39.6x       1.882      1.594x
-  32b 4096 (large)        41654.91          3.8x       2.797      1.430x
-  32b 4096 r6             48137.38          3.3x       2.793      1.432x
+  4096 (large)            11262.28         21.3x       0.879      2.276x
+  1152 (typical)          11493.44         20.9x       0.878      2.277x
+  576 (small)             11797.50         20.3x       0.887      2.255x
+  192 (tiny)              12839.89         18.7x       0.925      2.163x
+  LPC-4 4096              21270.43         11.3x       0.838      2.386x
+  LPC-8 4096              26489.53          9.0x       0.836      2.392x
+  LPC-8 1152              25995.45          9.2x       0.841      2.379x
+  LPC-12 4096             29659.51          8.1x       0.836      2.392x
+  LPC-8 search 4096       37169.20          6.4x       0.833      2.401x
+  LPC-8 search 1152       36322.90          6.6x       0.838      2.387x
+  4096 r6                 13400.26         17.9x       0.874      2.290x
+  1152 r6                 14420.34         16.6x       0.878      2.278x
+  LPC-8 r6 4096           29140.56          8.2x       0.830      2.411x
+  LPC-8 search r6 4096    40272.71          5.9x       0.828      2.417x
+  24b 4096 (large)        15043.33         15.9x       1.880      1.596x
+  24b 1152 (typical)      15275.85         15.7x       1.879      1.596x
+  24b 4096 r6             17705.10         13.5x       1.874      1.601x
+  24b LPC-8 4096          57755.35          4.1x       1.836      1.634x
+  24b mono 4096            6045.62         39.6x       1.882      1.594x
+  32b 4096 (large)        41655.28          3.8x       2.797      1.430x
+  32b 4096 r6             48137.54          3.3x       2.793      1.432x
 ```
 
 ### ESP32-P4 @ 360 MHz
@@ -89,25 +89,27 @@ Measured on a pre-rev.3.0 eval board, which the benchmark runs at 360 MHz; rev 3
 
   Test Case              Time (ms)     Real-time   Bytes/smp       Ratio
   --------------------  ----------  ------------  ----------  ----------
-  4096 (large)             9295.55         25.8x       0.879      2.276x
-  1152 (typical)           9468.07         25.3x       0.878      2.277x
-  576 (small)              9693.32         24.8x       0.887      2.255x
-  192 (tiny)              10498.04         22.9x       0.925      2.163x
-  LPC-4 4096              16480.25         14.5x       0.838      2.386x
-  LPC-8 4096              19473.99         12.3x       0.836      2.392x
-  LPC-8 1152              19413.04         12.4x       0.841      2.379x
-  LPC-12 4096             21566.25         11.1x       0.836      2.392x
-  LPC-8 search 4096       25479.56          9.4x       0.833      2.401x
-  LPC-8 search 1152       25437.49          9.4x       0.838      2.387x
-  4096 r6                 11170.45         21.5x       0.874      2.290x
-  1152 r6                 12049.54         19.9x       0.878      2.278x
-  LPC-8 r6 4096           21744.74         11.0x       0.830      2.411x
-  LPC-8 search r6 4096    28114.12          8.5x       0.828      2.417x
-  24b 4096 (large)        11906.92         20.1x       1.880      1.596x
-  24b 1152 (typical)      12079.09         19.9x       1.879      1.596x
-  24b 4096 r6             14102.36         17.0x       1.874      1.601x
-  24b LPC-8 4096          35525.71          6.7x       1.836      1.634x
-  24b mono 4096            4676.46         51.2x       1.882      1.594x
+  4096 (large)             9304.43         25.8x       0.879      2.276x
+  1152 (typical)           9471.14         25.3x       0.878      2.277x
+  576 (small)              9695.74         24.8x       0.887      2.255x
+  192 (tiny)              10497.51         22.9x       0.925      2.163x
+  LPC-4 4096              16466.11         14.6x       0.838      2.386x
+  LPC-8 4096              19498.94         12.3x       0.836      2.392x
+  LPC-8 1152              19420.68         12.4x       0.841      2.379x
+  LPC-12 4096             21583.63         11.1x       0.836      2.392x
+  LPC-8 search 4096       25550.42          9.4x       0.833      2.401x
+  LPC-8 search 1152       25463.47          9.4x       0.838      2.387x
+  4096 r6                 11155.46         21.5x       0.874      2.290x
+  1152 r6                 12060.71         19.9x       0.878      2.278x
+  LPC-8 r6 4096           21714.25         11.0x       0.830      2.411x
+  LPC-8 search r6 4096    28092.73          8.5x       0.828      2.417x
+  24b 4096 (large)        11929.91         20.1x       1.880      1.596x
+  24b 1152 (typical)      12097.33         19.8x       1.879      1.596x
+  24b 4096 r6             14054.34         17.0x       1.874      1.601x
+  24b LPC-8 4096          35678.58          6.7x       1.836      1.634x
+  24b mono 4096            4677.44         51.2x       1.882      1.594x
+  32b 4096 (large)        22455.69          7.1x       2.797      1.430x
+  32b 4096 r6             24704.16          6.5x       2.793      1.432x
 ```
 
 The encoder's output is platform-independent, so the Bytes/smp and Ratio columns are identical on every device; only the times differ.
@@ -116,7 +118,7 @@ The encoder's output is platform-independent, so the Bytes/smp and Ratio columns
 
 ### Real-Time Factor (RTF)
 
-RTF = encode_time / audio_duration, per pass (Time (ms) / 8 / 30 s)
+RTF = encode_time / audio_duration, per pass (Time (ms) / 8 / 30 s; 20 s for the 32-bit cases)
 
 - **RTF < 1.0**: Faster than real-time; the encoder keeps up with live input
 - **RTF = 1.0**: Exactly real-time
@@ -129,15 +131,17 @@ RTF = encode_time / audio_duration, per pass (Time (ms) / 8 / 30 s)
 | ESP32-S3 | 240 MHz | 16-bit no LPC, blocks 192-4096 | 0.047-0.054 | 19-21x |
 | ESP32-S3 | 240 MHz | 16-bit LPC-8, blocks 1152/4096 | 0.108-0.111 | 9x |
 | ESP32-S3 | 240 MHz | 24-bit no LPC, blocks 1152/4096 | 0.063-0.064 | 16x |
+| ESP32-S3 | 240 MHz | 32-bit, block 4096 | 0.26-0.30 | 3.3-3.8x |
 | ESP32-P4 | 360 MHz | 16-bit no LPC, blocks 192-4096 | 0.039-0.044 | 23-26x |
 | ESP32-P4 | 360 MHz | 16-bit LPC-8, blocks 1152/4096 | 0.081 | 12x |
 | ESP32-P4 | 360 MHz | 24-bit no LPC, blocks 1152/4096 | 0.050 | 20x |
+| ESP32-P4 | 360 MHz | 32-bit, block 4096 | 0.14-0.15 | 6.5-7.1x |
 
-The P4's 1.5x clock advantage translates into about 1.2x the S3's throughput on the 16-bit cases without LPC, 1.3-1.5x on 16-bit LPC (the stereo search gains the most), and 1.6x on 24-bit LPC-8.
+The P4's 1.5x clock advantage translates into about 1.2x the S3's throughput on the 16-bit cases without LPC, 1.3-1.5x on 16-bit LPC (the stereo search gains the most), 1.6x on 24-bit LPC-8, and 1.9x on the 32-bit cases (64-bit analysis).
 
 ### Bytes/Sample and Compression Ratio
 
-`Bytes/sample` is the average FLAC output size per PCM sample across all channels; multiply by 8 for bits/sample. `Ratio` is `(bits_per_sample / 8) / bytes_per_sample`, i.e. how much smaller the FLAC output is than the input PCM (2 bytes per sample for the 16-bit cases, 3 for the 24-bit ones).
+`Bytes/sample` is the average FLAC output size per PCM sample across all channels; multiply by 8 for bits/sample. `Ratio` is `(bits_per_sample / 8) / bytes_per_sample`, i.e. how much smaller the FLAC output is than the input PCM (2 bytes per sample for the 16-bit cases, 3 for the 24-bit ones and 4 for the 32-bit ones).
 
 Performance and compression both vary with:
 
@@ -163,7 +167,7 @@ Performance and compression both vary with:
 
 ## Memory Usage
 
-The decoded test signal (30 seconds of 48 kHz stereo 16-bit PCM, about 5.5 MB) is allocated from PSRAM, falling back to any available RAM. A 24-bit copy (about 8.2 MB) also goes in PSRAM; without room for it, the 24-bit cases are skipped. The encoder reads them sequentially, so PSRAM's latency has little effect. The full run needs about 14 MB of free PSRAM, such as a 16 MB S3 module or the P4 eval board's 32 MB; with 8 MB only the 16-bit cases run. The output buffer, sized by `FLACEncoder::get_max_output_bytes()`, uses the default heap.
+The decoded test signal (30 seconds of 48 kHz stereo 16-bit PCM, about 5.5 MB) is allocated from PSRAM, falling back to any available RAM. A 24-bit copy (about 8.2 MB) also goes in PSRAM; without room for it, the 24-bit cases are skipped. It is freed before the 32-bit cases, whose copy of the first 20 seconds (about 7.3 MB) takes its place, or they are skipped too. The encoder reads them sequentially, so PSRAM's latency has little effect. The full run needs about 14 MB of free PSRAM, such as a 16 MB S3 module or the P4 eval board's 32 MB; with 8 MB only the 16-bit cases run. The output buffer, sized by `FLACEncoder::get_max_output_bytes()`, uses the default heap.
 
 ## File Structure
 
@@ -191,4 +195,4 @@ encode_benchmark/
 
 - Verify CPU frequency is 240 MHz (ESP32-S3) or 360 MHz (ESP32-P4)
 - Check that optimization flags (`-O2`) are enabled
-- Ensure you're not running in debug mode
+- Build in release mode, not debug

@@ -1,6 +1,6 @@
 # FLAC to WAV Converter Example
 
-Converts FLAC files to WAV format using the microFLAC decoder. Supports native FLAC and Ogg FLAC containers, all bit depths (8, 12, 16, 20, 24, 32 bits), and various channel configurations (mono to 8 channels).
+Converts FLAC files to WAV format using the microFLAC decoder. Supports native FLAC and Ogg FLAC containers, all bit depths (4-32 bits), and various channel configurations (mono to 8 channels).
 
 ## Building
 
@@ -72,4 +72,4 @@ The converter produces standard WAV files:
 
 ## Testing
 
-A comprehensive test suite is available to validate the decoder against the official FLAC test files. See [TESTING.md](TESTING.md) for details on setting up test files, running the test suite, and interpreting results.
+A test suite validates the decoder against the official FLAC test files. See [TESTING.md](TESTING.md) for details on setting up test files, running the test suite, and interpreting results.
