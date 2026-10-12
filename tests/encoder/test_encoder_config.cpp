@@ -294,8 +294,11 @@ void check_encode_arguments() {
           static_cast<long long>(consumed) + static_cast<long long>(written), 0);
     check("null input with bytes", e.encode(nullptr, 1, out.data(), out.size(), consumed, written),
           FLAC_ENCODER_ERROR_INVALID_ARGUMENT);
-    check("null input with 0 bytes is just too little",
+    check("null input with 0 bytes",
           e.encode(nullptr, 0, out.data(), out.size(), consumed, written),
+          FLAC_ENCODER_ERROR_INVALID_ARGUMENT);
+    check("0 bytes is just too little",
+          e.encode(in.data(), 0, out.data(), out.size(), consumed, written),
           FLAC_ENCODER_NEED_MORE_DATA);
     check("one byte short of a block",
           e.encode(in.data(), block_bytes - 1, out.data(), out.size(), consumed, written),

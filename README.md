@@ -212,6 +212,7 @@ Available after `decode()` returns `FLAC_DECODER_HEADER_READY` via `decoder.get_
 | `FLAC_DECODER_HEADER_READY` | 1 | Header parsed, stream info available (allocate output buffer now) |
 | `FLAC_DECODER_END_OF_STREAM` | 2 | No more frames to decode |
 | `FLAC_DECODER_NEED_MORE_DATA` | 3 | Not enough input data; feed more and call `decode()` again |
+| `FLAC_DECODER_ERROR_INVALID_ARGUMENT` | -21 | `input` is null (even with `input_len` 0), or `output` is null after `HEADER_READY`. Fix the argument and retry; the decoder's state is unchanged |
 
 ### Encoder Methods
 
@@ -250,7 +251,7 @@ Every call returns `FLACEncoderResult`: non-negative values are success/informat
 | `FLAC_ENCODER_SUCCESS` | 0 | The call did its work (check `bytes_written`) |
 | `FLAC_ENCODER_NEED_MORE_DATA` | 1 | `encode()` was given less than one block; nothing consumed |
 | `FLAC_ENCODER_ERROR_OUTPUT_BUFFER_TOO_SMALL` | -1 | Output buffer smaller than `get_max_output_bytes()` (or `HEADER_BYTES` for `write_header()`) |
-| `FLAC_ENCODER_ERROR_INVALID_ARGUMENT` | -2 | Null pointer, misaligned 2-byte-sample input, or a `finish()` remainder that is not whole sample frames or is longer than one block |
+| `FLAC_ENCODER_ERROR_INVALID_ARGUMENT` | -2 | Null `output`; null `input` to `encode()`, or to `finish()` with bytes (`finish(nullptr, 0, ...)` ends a stream with no remainder); misaligned 2-byte-sample input, or a `finish()` remainder that is not whole sample frames or is longer than one block |
 | `FLAC_ENCODER_ERROR_BAD_CONFIG` | -3 | Unsupported `PcmFormat` or `FLACEncoderOptions`. Persists until `reset(format, options)` with a supported configuration |
 | `FLAC_ENCODER_ERROR_STREAM_FINISHED` | -4 | `encode()` or `finish()` after `finish()`; call `reset()` to start a new stream |
 | `FLAC_ENCODER_ERROR_STREAM_TOO_LONG` | -5 | The next frame number would exceed the format's 2^31 - 1 |
