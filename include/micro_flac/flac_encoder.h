@@ -101,8 +101,8 @@ struct FLACEncoderOptions {
     /// With `lpc` on a stereo stream, design LPC for all four candidate
     /// signals (left, right, mid, side) before choosing the channel
     /// assignment, instead of choosing from the fixed predictors. Typically
-    /// 0.05-0.25% smaller (up to about 0.5%), for about 40% more encode time
-    /// on an ESP32-S3.
+    /// 0.01-0.25% smaller (median about 0.06%, up to about 0.5%), for about
+    /// 40% more encode time on an ESP32-S3.
     bool lpc_stereo_search{false};
 
     /// Largest Rice partition order tried, in [0,

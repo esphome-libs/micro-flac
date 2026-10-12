@@ -1,6 +1,6 @@
 # FLAC Encode Benchmark for ESP32
 
-Measures FLAC encoding performance on ESP32-S3 and ESP32-P4. Decodes the embedded test clip to PCM once at startup, then re-encodes it repeatedly across a set of test cases (block sizes, LPC orders, Rice partitioning, 24-bit and mono) to benchmark encode throughput and the compression achieved.
+Measures FLAC encoding performance on ESP32-S3 and ESP32-P4. Decodes the embedded test clip to PCM once at startup, then re-encodes it repeatedly across a set of test cases (block sizes, LPC orders, Rice partitioning, 24-bit, mono and 32-bit) to benchmark encode throughput and the compression achieved.
 
 ## Features
 
@@ -137,7 +137,7 @@ RTF = encode_time / audio_duration, per pass (Time (ms) / 8 / 30 s; 20 s for the
 | ESP32-P4 | 360 MHz | 24-bit no LPC, blocks 1152/4096 | 0.050 | 20x |
 | ESP32-P4 | 360 MHz | 32-bit, block 4096 | 0.14-0.15 | 6.5-7.1x |
 
-The P4's 1.5x clock advantage translates into about 1.2x the S3's throughput on the 16-bit cases without LPC, 1.3-1.5x on 16-bit LPC (the stereo search gains the most), 1.6x on 24-bit LPC-8, and 1.9x on the 32-bit cases (64-bit analysis).
+The P4's 1.5x clock advantage translates into about 1.2x the S3's throughput on the 16- and 24-bit cases without LPC, 1.3-1.5x on 16-bit LPC (the stereo search gains the most), 1.6x on 24-bit LPC-8, and 1.9x on the 32-bit cases (64-bit analysis).
 
 ### Bytes/Sample and Compression Ratio
 

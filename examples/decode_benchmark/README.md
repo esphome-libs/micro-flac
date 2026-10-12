@@ -135,7 +135,7 @@ The benchmark runs each chunk size first with CRC disabled, then with CRC enable
   1 byte chunks           14489.41      2.1x    15284.61      2.0x
 ```
 
-Streaming with chunks of 100 bytes or larger has negligible overhead compared to full-frame decoding. CRC checking adds roughly ~8% overhead for 16-bit and ~12% for 24-bit audio.
+Streaming in chunks of 500 bytes or larger adds under 2% over full-frame decoding (100-byte chunks: 6-9%). CRC checking adds roughly 9% for 16-bit and 12% for 24-bit audio.
 
 ## Interpreting Results
 

@@ -40,7 +40,7 @@ dependencies:
   esphome/micro-flac: "^0.3.0"
 ```
 
-Then configure via `menuconfig` (Component config → microFLAC), and include and use it:
+Then configure via `idf.py menuconfig` (Component config → microFLAC), and include and use it:
 
 ```cpp
 #include "micro_flac/flac_decoder.h"
@@ -142,7 +142,7 @@ Add to `platformio.ini`:
 platform = espressif32
 framework = espidf
 lib_deps =
-    esphome/micro-flac
+    esphome/micro-flac@^0.3.0
 
 # Configure memory preference
 build_flags =
@@ -216,7 +216,7 @@ Available after `decode()` returns `FLAC_DECODER_HEADER_READY` via `decoder.get_
   - `block_size` (16-65535, default 4096).
   - `lpc` (default off): also try linear prediction on each subframe, keeping it where it is estimated smaller. Typically 7-9% smaller on 16-bit music. Streams of 17-24 bits use 64-bit arithmetic, much slower on an ESP32 (see [Encoding Performance](#encoding-performance)). Streams of 25-32 bits ignore it and use the fixed predictors only.
   - `max_lpc_order` (1-12, default 8): the highest LPC order tried. Orders 4, 8 and 12 come out about 6.8%, 8.6% and 9% smaller than the fixed predictors alone.
-  - `lpc_stereo_search` (default off): with `lpc` on stereo, choose each frame's channel assignment after designing LPC for all four candidates (left, right, mid, side) rather than from the fixed predictors. Typically 0.05-0.25% smaller, up to about 0.5%.
+  - `lpc_stereo_search` (default off): with `lpc` on stereo, choose each frame's channel assignment after designing LPC for all four candidates (left, right, mid, side) rather than from the fixed predictors. Typically 0.01-0.25% smaller (median about 0.06%), up to about 0.5%.
   - `max_rice_partition_order` (0-6, default 0): split each subframe's residuals into up to 2^order partitions with their own Rice parameters. About 1% smaller at block size 4096, 0.3% at 1152.
   - `wasted_bits` (default on): code a subframe whose samples all end in the same k zero bits k bits shallower (RFC 9639 §9.2.2), as with 16-bit audio in a 24-bit stream.
 
@@ -289,8 +289,8 @@ Encoding the 30-second 48 kHz stereo clip on an ESP32-S3 at 240 MHz (`examples/e
 | Defaults, block size 1152 | 20.9x realtime | 15.7x realtime | same |
 | `max_rice_partition_order` 6 | 17.9x realtime | 13.5x realtime | -0.6% |
 | `lpc`, order 4 | 11.3x realtime | n/a | -4.6% |
-| `lpc`, order 8 | 9.0x realtime | 4.1x realtime | -4.8% |
-| `lpc`, order 12 | 8.1x realtime | n/a | -4.8% |
+| `lpc`, order 8 | 9.0x realtime | 4.1x realtime | -4.9% |
+| `lpc`, order 12 | 8.1x realtime | n/a | -4.9% |
 | `lpc` order 8 + `lpc_stereo_search` | 6.4x realtime | n/a | -5.2% |
 | `lpc` order 8 + search + partitions | 5.9x realtime | n/a | -5.8% |
 
@@ -322,7 +322,7 @@ cmake -B build && cmake --build build
 python3 test_flac_decoder.py
 ```
 
-Tests validate bit-perfect PCM output, MD5 signatures, various bit depths (4-32), sample rates, channel counts (1-8), embedded album art, byte-by-byte streaming, and Ogg FLAC containers. See [host_examples/flac_to_wav/TESTING.md](host_examples/flac_to_wav/TESTING.md) for full test suite details, test categories, and troubleshooting.
+Tests validate bit-perfect PCM output, MD5 signatures, various bit depths (8-32; the encoder's round-trip suite covers 4-7), sample rates, channel counts (1-8), embedded album art, byte-by-byte streaming, and Ogg FLAC containers. See [host_examples/flac_to_wav/TESTING.md](host_examples/flac_to_wav/TESTING.md) for full test suite details, test categories, and troubleshooting.
 
 ```bash
 # ESP32 benchmark
