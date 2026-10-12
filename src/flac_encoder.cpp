@@ -1145,7 +1145,7 @@ void FLACEncoder::reset(const PcmFormat& format, const FLACEncoderOptions& optio
 // ============================================================================
 
 FLACEncoderResult FLACEncoder::write_header(uint8_t* output, size_t output_size_bytes,
-                                            size_t& bytes_written) {
+                                            size_t& bytes_written) const {
     bytes_written = 0;
 
     if (FLAC_UNLIKELY(this->config_result_ != FLAC_ENCODER_SUCCESS)) {
@@ -1230,12 +1230,14 @@ FLACEncoderResult FLACEncoder::encode(const uint8_t* input, size_t input_len, ui
     if (FLAC_UNLIKELY(check != FLAC_ENCODER_SUCCESS)) {
         return check;
     }
+    // Unlike finish(), where a null, empty remainder ends the stream, encode()
+    // has no use for a null input, so it is rejected as in FLACDecoder::decode()
+    if (FLAC_UNLIKELY(input == nullptr)) {
+        return FLAC_ENCODER_ERROR_INVALID_ARGUMENT;
+    }
     if (input_len < this->input_block_bytes_) {
         return FLAC_ENCODER_NEED_MORE_DATA;
     }
-    // A supported configuration's block is at least one byte, so check_call()
-    // has rejected a null input by now
-    FLAC_ASSUME(input != nullptr);
     const FLACEncoderResult room = this->check_frame_room(output_size_bytes);
     if (FLAC_UNLIKELY(room != FLAC_ENCODER_SUCCESS)) {
         return room;
@@ -1306,9 +1308,7 @@ void FLACEncoder::configure(const PcmFormat& format, const FLACEncoderOptions& o
     this->sample_rate_extra_len_ = 0;
     this->lpc_max_order_ = 0;
     this->lpc_precision_ = 0;
-#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
     this->lpc_stereo_search_ = false;
-#endif
     this->max_partition_order_ = 0;
 
     // Only validates and precomputes; config_result_ stays BAD_CONFIG unless

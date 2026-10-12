@@ -68,9 +68,10 @@ enum FLACEncoderResult : int8_t {
 
     // Errors (< 0)
     FLAC_ENCODER_ERROR_OUTPUT_BUFFER_TOO_SMALL = -1,  // Output buffer too small for the call
-    FLAC_ENCODER_ERROR_INVALID_ARGUMENT = -2,  // Null pointer, misaligned 2-byte-sample input,
-                                               // or a finish() remainder that is not whole
-                                               // sample frames or is longer than one block
+    FLAC_ENCODER_ERROR_INVALID_ARGUMENT = -2,  // Null output, null input (except finish() with
+                                               // 0 bytes), misaligned 2-byte-sample input, or
+                                               // a finish() remainder that is not whole sample
+                                               // frames or is longer than one block
     FLAC_ENCODER_ERROR_BAD_CONFIG = -3,        // Unsupported PcmFormat or FLACEncoderOptions
     FLAC_ENCODER_ERROR_STREAM_FINISHED = -4,   // encode()/finish() after finish(); call reset()
     FLAC_ENCODER_ERROR_STREAM_TOO_LONG = -5    // Next frame number would exceed 2^31 - 1
@@ -325,7 +326,7 @@ public:
     /// @return FLAC_ENCODER_SUCCESS or a negative error code
     MICRO_FLAC_NODISCARD
     FLACEncoderResult write_header(uint8_t* output, size_t output_size_bytes,
-                                   size_t& bytes_written);
+                                   size_t& bytes_written) const;
 
     /// @brief Encode one block of PCM into one FLAC frame
     ///
@@ -333,9 +334,9 @@ public:
     /// less, consumes nothing and returns FLAC_ENCODER_NEED_MORE_DATA. The
     /// output size is checked only once there is a full block.
     ///
-    /// @param input Packed PCM (see PcmFormat; may be null only when input_len
-    ///        is 0). When bytes_per_sample() is 2 and input_len is not 0, it
-    ///        must be 2-byte aligned
+    /// @param input Packed PCM (see PcmFormat; must not be null, even when
+    ///        input_len is 0). When bytes_per_sample() is 2 and input_len is
+    ///        not 0, it must be 2-byte aligned
     /// @param input_len Bytes available at input
     /// @param output Output buffer (must not be null)
     /// @param output_size_bytes Size of output; at least get_max_output_bytes()
@@ -498,11 +499,9 @@ private:
     uint8_t sample_rate_extra_len_{0};  // 0, 1, or 2
     uint8_t lpc_max_order_{0};          // Highest LPC order tried; 0 when LPC does not apply
     uint8_t lpc_precision_{0};          // LPC coefficient precision to aim for
-#ifndef MICRO_FLAC_ENCODER_DISABLE_LPC
-    bool lpc_stereo_search_{false};  // FLACEncoderOptions::lpc_stereo_search, where it applies
-#endif
-    uint8_t max_partition_order_{0};        // Largest Rice partition order tried; 0 when off
-    bool finished_{false};                  // Whether finish() has ended this stream
+    bool lpc_stereo_search_{false};     // FLACEncoderOptions::lpc_stereo_search, where it applies
+    uint8_t max_partition_order_{0};    // Largest Rice partition order tried; 0 when off
+    bool finished_{false};              // Whether finish() has ended this stream
     bool stereo_estimation_enabled_{true};  // false forces independent stereo; set only by
                                             // test_encoder_config (-fno-access-control)
 };

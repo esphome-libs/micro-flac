@@ -277,7 +277,7 @@ public:
     /// 3 bytes for 24-bit), little-endian on every host. Use the int32_t* overload for
     /// uniform 32-bit output.
     ///
-    /// @param input Pointer to input data buffer (must not be null)
+    /// @param input Pointer to input data buffer (must not be null, even when input_len is 0)
     /// @param input_len Number of bytes available in input buffer
     /// @param output Pointer to output buffer for PCM samples (may be nullptr before HEADER_READY)
     /// @param output_size_bytes Size of the output buffer in bytes
@@ -311,7 +311,7 @@ public:
     /// downstream processing on embedded devices by providing a uniform sample format.
     /// The samples are int32_t values, so they are in the host's byte order.
     ///
-    /// @param input Pointer to input data buffer (must not be null)
+    /// @param input Pointer to input data buffer (must not be null, even when input_len is 0)
     /// @param input_len Number of bytes available in input buffer
     /// @param output Pointer to int32_t output buffer (may be nullptr before HEADER_READY)
     /// @param output_size_samples Size of the output buffer in samples (number of int32_t elements,

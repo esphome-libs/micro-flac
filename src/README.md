@@ -166,7 +166,7 @@ With `FLACEncoderOptions::wasted_bits`, a subframe whose samples all end in the 
 
 ### Compile-Time Switches
 
-`MICRO_FLAC_ENCODER_DISABLE_LPC` and `MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS` (Kconfig `MICRO_FLAC_ENCODER_ENABLE_*`, host CMake options of the same names) each compile a feature out. Options for a missing feature are validated and then ignored. They are PUBLIC definitions because `flac_encoder.h` reads them: it reports them (`FLACEncoder::LPC_AVAILABLE`, `RICE_PARTITIONS_AVAILABLE`, `MAX_LPC_BITS_PER_SAMPLE`), and the LPC switch also removes a member.
+`MICRO_FLAC_ENCODER_DISABLE_LPC` and `MICRO_FLAC_ENCODER_DISABLE_RICE_PARTITIONS` (Kconfig `MICRO_FLAC_ENCODER_ENABLE_*`, host CMake options of the same names) each compile a feature out. Options for a missing feature are validated and then ignored. They are PUBLIC definitions because `flac_encoder.h` reads them: it reports them (`FLACEncoder::LPC_AVAILABLE`, `RICE_PARTITIONS_AVAILABLE`, `MAX_LPC_BITS_PER_SAMPLE`). Neither switch changes the class layout.
 
 ### Bit Writer Design
 
