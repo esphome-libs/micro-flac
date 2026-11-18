@@ -24,7 +24,7 @@
 #ifdef ESP_PLATFORM
 #include <esp_heap_caps.h>
 #else
-#include <cstdlib>
+#include <cstdlib>  // IWYU pragma: keep (malloc/free, used by the FLAC_MALLOC/FLAC_FREE expansions)
 #endif
 
 // ============================================================================
