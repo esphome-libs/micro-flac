@@ -303,7 +303,7 @@ On a typical music corpus LPC gains more (7-9%) than on this clip. A host encode
 | Allocation | Size | Notes |
 | ---------- | ---- | ----- |
 | Decoder object | ~290 bytes | Stack or heap |
-| Block samples buffer | `max_block_size × channels × 4` | Typically 16-64KB |
+| Block samples buffer | `max_block_size × channels × 4` | Typically 16-64KB; kept across `reset()`, reallocated only when a later stream needs more |
 | Metadata blocks | Variable | Configurable per type |
 | Output buffer | `max_block_size × channels × bytes_per_sample` | Allocated by user |
 | Encoder object | ~2.1 KB | Stack or heap. `encode()` itself needs up to about 1.6 KB of task stack, 2.3 KB with partitioning, 3.4 KB with LPC, or 4.3 KB with the stereo search |
