@@ -124,8 +124,8 @@ FLACDecoder::~FLACDecoder() {
 }
 
 void FLACDecoder::reset() {
-    // Free dynamic allocations
-    this->free_buffers();
+    // Free dynamic allocations, keeping the working sample buffers for the next stream
+    this->free_stream_buffers();
 
     // Reset container detection and Ogg state
     this->container_type_ = ContainerType::UNKNOWN;
@@ -698,18 +698,30 @@ FLACDecoderResult FLACDecoder::read_header(const uint8_t* buffer, size_t buffer_
     return FLAC_DECODER_SUCCESS;
 }
 
+/// Makes `buffer` hold at least `count` elements, reallocating only when it holds fewer;
+/// `capacity` is in elements and is 0 after a failed allocation. Returns false on that failure.
+template <typename T>
+static bool reserve_buffer(T** buffer, size_t* capacity, size_t count) {
+    if (*buffer != nullptr && *capacity >= count) {
+        return true;
+    }
+    if (*buffer != nullptr) {
+        FLAC_FREE(*buffer);
+    }
+    *buffer = static_cast<T*>(FLAC_MALLOC(count * sizeof(T)));
+    *capacity = (*buffer != nullptr) ? count : 0;
+    return *buffer != nullptr;
+}
+
 FLAC_HOT FLACDecoderResult FLACDecoder::decode_frame(const uint8_t* buffer, size_t buffer_length,
                                                      uint8_t* output_buffer, uint32_t* num_samples,
                                                      bool output_32bit) {
     *num_samples = 0;
 
-    // Allocate block_samples_ if needed
-    if (!this->block_samples_) {
-        this->block_samples_ = static_cast<int32_t*>(
-            FLAC_MALLOC(static_cast<size_t>(this->stream_info_.max_block_size()) *
-                        this->stream_info_.num_channels() * sizeof(int32_t)));
-    }
-    if (!this->block_samples_) {
+    // Allocate block_samples_ if this stream needs more than it holds
+    if (!reserve_buffer(&this->block_samples_, &this->block_samples_capacity_,
+                        static_cast<size_t>(this->stream_info_.max_block_size()) *
+                            this->stream_info_.num_channels())) {
         return FLAC_DECODER_ERROR_MEMORY_ALLOCATION;
     }
 
@@ -996,12 +1008,9 @@ FLAC_HOT FLACDecoderResult FLACDecoder::decode_subframes(uint32_t block_size,
     }
 
     // Lazily allocate the wide side buffer when needed
-    if (wide_side && !this->side_subframe_) {
-        this->side_subframe_ = static_cast<int64_t*>(FLAC_MALLOC(
-            static_cast<size_t>(this->stream_info_.max_block_size()) * sizeof(int64_t)));
-        if (!this->side_subframe_) {
-            return FLAC_DECODER_ERROR_MEMORY_ALLOCATION;
-        }
+    if (wide_side && !reserve_buffer(&this->side_subframe_, &this->side_subframe_capacity_,
+                                     this->stream_info_.max_block_size())) {
+        return FLAC_DECODER_ERROR_MEMORY_ALLOCATION;
     }
 
     // side_ch: index of the side channel within the stereo pair
@@ -1626,12 +1635,18 @@ void FLACDecoder::free_buffers() {
         FLAC_FREE(this->block_samples_);
         this->block_samples_ = nullptr;
     }
+    this->block_samples_capacity_ = 0;
 
     if (this->side_subframe_) {
         FLAC_FREE(this->side_subframe_);
         this->side_subframe_ = nullptr;
     }
+    this->side_subframe_capacity_ = 0;
 
+    this->free_stream_buffers();
+}
+
+void FLACDecoder::free_stream_buffers() {
 #ifndef MICRO_FLAC_DISABLE_OGG
     // Clean up Ogg demuxer
     this->ogg_demuxer_.reset();

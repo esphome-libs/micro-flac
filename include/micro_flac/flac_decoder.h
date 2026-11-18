@@ -251,9 +251,9 @@ public:
     ///
     /// Resets all decode state (container detection, header parsing, frame decoding,
     /// subframe state, LPC state, residual state, Rice state, bit buffer, stream info,
-    /// and metadata blocks). The `block_samples_` working buffer is freed so the decoder
-    /// can reallocate it at the correct size for the new stream. Any allocated Ogg demuxer
-    /// is also freed.
+    /// and metadata blocks). Any allocated Ogg demuxer is freed. The working sample buffers
+    /// are kept and reallocated only when a later stream needs larger ones, so a run of
+    /// streams of the same or smaller block size and channel count allocates them once.
     ///
     /// User configuration is preserved across the reset:
     /// - CRC checking enable/disable (set via set_crc_check_enabled())
@@ -612,8 +612,12 @@ private:
     /// @param reset_bits Whether to reset bit buffer state (default true)
     void set_buffer(const uint8_t* buf, size_t len, bool reset_bits = true);
 
-    /// @brief Free allocated buffers (called by destructor)
+    /// @brief Free every allocated buffer (called by destructor)
     void free_buffers();
+
+    /// @brief Free the buffers a stream's container and metadata use, keeping the working sample
+    /// buffers (called by reset())
+    void free_stream_buffers();
 
     /// @brief Transition to unrecoverable error state, latching the error code
     FLACDecoderResult set_fatal_error(FLACDecoderResult error) {
@@ -648,8 +652,10 @@ private:
     uint32_t curr_frame_bits_per_sample_{0};  // Bits per sample of current frame
 
     // Decode buffers
-    int32_t* block_samples_{nullptr};  // Working buffer for decoded samples (all channels)
-    int64_t* side_subframe_{nullptr};  // Wide buffer for 33-bit MID_SIDE side channel (lazy)
+    int32_t* block_samples_{nullptr};   // Working buffer for decoded samples (all channels)
+    int64_t* side_subframe_{nullptr};   // Wide buffer for 33-bit MID_SIDE side channel (lazy)
+    size_t block_samples_capacity_{0};  // Samples block_samples_ holds
+    size_t side_subframe_capacity_{0};  // Samples side_subframe_ holds
 
     // Bit buffer state
     bit_buffer_t bit_buffer_{

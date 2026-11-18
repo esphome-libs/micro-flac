@@ -28,6 +28,9 @@
 //      byte, invalid continuation byte, or the 7-byte sample-number form
 //      inside a fixed-block-size stream) must be rejected even though their
 //      CRC-8/CRC-16 are internally consistent.
+//   4. One decoder reset() between two streams decodes the second, whose
+//      blocks are larger than the first's, without overrunning the sample
+//      buffer it kept from the first.
 //
 // Exits 0 on success; prints each failure and exits 1 otherwise.
 
@@ -60,6 +63,7 @@ int g_failures = 0;
     } while (0)
 
 constexpr uint32_t BLOCK_SIZE = 192;
+constexpr uint32_t LARGE_BLOCK_SIZE = 256;
 constexpr uint32_t SAMPLE_RATE = 44100;
 constexpr size_t NUM_FRAMES = 5;
 constexpr int16_t FRAME_VALUES[NUM_FRAMES] = {0x1234, 0x2345, 0x3456, 0x4567, 0x5678};
@@ -84,11 +88,12 @@ void append_be(std::vector<uint8_t>& out, uint64_t value, size_t num_bytes) {
 }
 
 void append_frame(std::vector<uint8_t>& out, uint32_t frame_number, int16_t value,
-                  CodedNumberVariant variant) {
+                  CodedNumberVariant variant, uint32_t block_size) {
     std::vector<uint8_t> frame;
     frame.push_back(0xFF);
     frame.push_back(0xF8);  // sync (15 bits) + mandatory 0 + fixed block size strategy
-    frame.push_back(0x19);  // block size code 1 (192) | sample rate code 9 (44100)
+    // block size code 1 (192) or 8 (256) | sample rate code 9 (44100)
+    frame.push_back(block_size == LARGE_BLOCK_SIZE ? 0x89 : 0x19);
     frame.push_back(0x08);  // channel assignment 0 (mono) | bit depth code 4 (16) | 0
 
     switch (variant) {
@@ -124,7 +129,8 @@ void append_frame(std::vector<uint8_t>& out, uint32_t frame_number, int16_t valu
     out.insert(out.end(), frame.begin(), frame.end());
 }
 
-SyntheticStream build_stream(CodedNumberVariant first_frame_variant) {
+SyntheticStream build_stream(CodedNumberVariant first_frame_variant,
+                             uint32_t block_size = BLOCK_SIZE) {
     SyntheticStream stream;
     std::vector<uint8_t>& out = stream.bytes;
 
@@ -132,8 +138,8 @@ SyntheticStream build_stream(CodedNumberVariant first_frame_variant) {
     out.push_back(0x80);  // last metadata block | type 0 (STREAMINFO)
     append_be(out, 34, 3);
 
-    append_be(out, BLOCK_SIZE, 2);  // min block size
-    append_be(out, BLOCK_SIZE, 2);  // max block size
+    append_be(out, block_size, 2);  // min block size
+    append_be(out, block_size, 2);  // max block size
     append_be(out, 0, 3);           // min frame size (unknown)
     append_be(out, 0, 3);           // max frame size (unknown)
     // sample_rate(20) | channels-1(3) | bps-1(5) | total_samples(36)
@@ -141,7 +147,7 @@ SyntheticStream build_stream(CodedNumberVariant first_frame_variant) {
     // up one-to-one with the bit-layout comment above.
     // cppcheck-suppress badBitmaskCheck
     uint64_t packed = (static_cast<uint64_t>(SAMPLE_RATE) << 44) | (0ULL << 41) | (15ULL << 36) |
-                      (NUM_FRAMES * BLOCK_SIZE);
+                      (NUM_FRAMES * block_size);
     append_be(out, packed, 8);
     for (size_t i = 0; i < 16; ++i) {
         out.push_back(0x00);  // MD5 unknown
@@ -150,7 +156,7 @@ SyntheticStream build_stream(CodedNumberVariant first_frame_variant) {
     for (size_t i = 0; i < NUM_FRAMES; ++i) {
         stream.frame_offsets[i] = out.size();
         CodedNumberVariant variant = (i == 0) ? first_frame_variant : CodedNumberVariant::VALID;
-        append_frame(out, static_cast<uint32_t>(i), FRAME_VALUES[i], variant);
+        append_frame(out, static_cast<uint32_t>(i), FRAME_VALUES[i], variant, block_size);
     }
     stream.frame_offsets[NUM_FRAMES] = out.size();
     return stream;
@@ -166,10 +172,9 @@ struct DecodeRun {
 
 // Feed the stream in fixed-size chunks, following the documented recovery
 // contract: after an error, advance by bytes_consumed and keep decoding.
-DecodeRun run_decoder(const std::vector<uint8_t>& stream, size_t chunk_size) {
+DecodeRun run_decoder(FLACDecoder& decoder, const std::vector<uint8_t>& stream, size_t chunk_size) {
     DecodeRun run;
-    FLACDecoder decoder;
-    std::vector<uint8_t> output(BLOCK_SIZE * sizeof(int16_t));
+    std::vector<uint8_t> output(LARGE_BLOCK_SIZE * sizeof(int16_t));
 
     size_t pos = 0;
     size_t stalled_calls = 0;
@@ -204,6 +209,11 @@ DecodeRun run_decoder(const std::vector<uint8_t>& stream, size_t chunk_size) {
         }
     }
     return run;
+}
+
+DecodeRun run_decoder(const std::vector<uint8_t>& stream, size_t chunk_size) {
+    FLACDecoder decoder;
+    return run_decoder(decoder, stream, chunk_size);
 }
 
 std::string values_to_string(const std::vector<int16_t>& values) {
@@ -283,6 +293,18 @@ void test_malformed_coded_number(CodedNumberVariant variant, const char* name) {
     }
 }
 
+void test_reset_to_larger_blocks() {
+    FLACDecoder decoder;
+    for (uint32_t block_size : {BLOCK_SIZE, LARGE_BLOCK_SIZE}) {
+        SyntheticStream stream = build_stream(CodedNumberVariant::VALID, block_size);
+        decoder.reset();
+        DecodeRun run = run_decoder(decoder, stream.bytes, stream.bytes.size());
+        EXPECT(run.errors.empty(), "errors decoding %u-sample blocks after a reset", block_size);
+        EXPECT(run.frame_values.size() == NUM_FRAMES, "decoded %zu/%zu %u-sample frames",
+               run.frame_values.size(), NUM_FRAMES, block_size);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -297,6 +319,8 @@ int main() {
     test_malformed_coded_number(CodedNumberVariant::INVALID_LEAD_FF, "lead_0xFF");
     test_malformed_coded_number(CodedNumberVariant::INVALID_CONTINUATION, "bad_continuation");
     test_malformed_coded_number(CodedNumberVariant::SEVEN_BYTE_FORM, "7byte_in_fixed");
+
+    test_reset_to_larger_blocks();
 
     if (g_failures == 0) {
         std::printf("All error-recovery regression tests passed\n");
