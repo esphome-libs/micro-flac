@@ -182,7 +182,7 @@ Performance varies based on:
 
 The `esp32` environment runs flash at 80 MHz in DIO mode (`CONFIG_ESPTOOLPY_FLASHFREQ_80M` in `sdkconfig.defaults.esp32`, `board_build.f_flash` in `platformio.ini`), and PSRAM at 80 MHz. ESP-IDF only offers 80 MHz PSRAM with 80 MHz flash: at 40 MHz flash, `CONFIG_SPIRAM_SPEED_80M` silently falls back to 40 MHz.
 
-Measured on an ESP32 (rev v1.0), 16-bit clip, full frame, real-time factor with CRC off / on:
+Measured on an ESP32 (rev v1.0), 16-bit clip, full frame, decode speed as a multiple of real time (`1 / RTF`), CRC off / on:
 
 | Working buffer | DIO 40 MHz    | DIO 80 MHz (default here) | QIO 80 MHz    |
 | -------------- | ------------- | ------------------------- | ------------- |
