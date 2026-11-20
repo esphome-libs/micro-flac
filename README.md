@@ -272,12 +272,12 @@ Decoding performance for 48kHz stereo audio (full frame, CRC enabled):
 
 | Chip | Clock | 16-bit | 24-bit |
 | ---- | ----- | ------ | ------ |
-| ESP32 (internal SRAM) | 240 MHz | ~12x realtime | n/a |
+| ESP32 (internal SRAM) | 240 MHz | ~20x realtime | n/a |
 | ESP32 (PSRAM) | 240 MHz | ~8x realtime | n/a |
 | ESP32-S3 | 240 MHz | ~31x realtime | ~20x realtime |
 | ESP32-P4 | 360 MHz | ~25x realtime | ~18x realtime |
 
-ESP32-S3 and ESP32-P4 numbers are measured with the working buffer in PSRAM (the default); PSRAM is fast enough on these chips that switching to internal SRAM only saves ~2-4% on the S3 and well under 1% on the P4. On the original ESP32, PSRAM is much slower than internal SRAM, so placing the working buffer in internal memory (`CONFIG_MICRO_FLAC_PREFER_INTERNAL=y`) is roughly 30-35% faster and is recommended for performance-sensitive use. Performance also varies with block size, prediction order, and sample depth (24-bit requires 64-bit arithmetic). See [examples/decode_benchmark/README.md](examples/decode_benchmark/README.md) for detailed benchmarks, streaming overhead analysis, and instructions for running your own.
+ESP32-S3 and ESP32-P4 numbers are measured with the working buffer in PSRAM (the default); PSRAM is fast enough on these chips that switching to internal SRAM only saves ~2-4% on the S3 and well under 1% on the P4. On the original ESP32, PSRAM is much slower than internal SRAM, so placing the working buffer in internal memory (`CONFIG_MICRO_FLAC_PREFER_INTERNAL=y`) is roughly 2.5x faster and is recommended for performance-sensitive use. The ESP32 numbers use the dev board's default DIO 40 MHz flash; QIO at 80 MHz, which also allows 80 MHz PSRAM, reaches ~25x realtime with internal memory and ~13x with PSRAM. Performance also varies with block size, prediction order, and sample depth (24-bit requires 64-bit arithmetic). See [examples/decode_benchmark/README.md](examples/decode_benchmark/README.md) for detailed benchmarks, streaming overhead analysis, and instructions for running your own.
 
 ### Encoding Performance
 

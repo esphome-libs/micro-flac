@@ -152,13 +152,13 @@ RTF = decode_time / audio_duration
 | Device | Clock | Bit depth | Working buffer | Expected RTF | Real-time |
 |--------|-------|-----------|----------------|--------------|-----------|
 | ESP32 | 240 MHz | 16-bit | PSRAM | 0.105-0.130 | 8-10x |
-| ESP32 | 240 MHz | 16-bit | Internal | 0.078-0.084 | 12-13x |
+| ESP32 | 240 MHz | 16-bit | Internal | 0.044-0.050 | 20-23x |
 | ESP32-S3 | 240 MHz | 16-bit | PSRAM | 0.030-0.034 | 29-34x |
 | ESP32-S3 | 240 MHz | 24-bit | PSRAM | 0.043-0.054 | 19-23x |
 | ESP32-P4 | 360 MHz | 16-bit | PSRAM | 0.037-0.041 | 25-27x |
 | ESP32-P4 | 360 MHz | 24-bit | PSRAM | 0.050-0.058 | 17-20x |
 
-On the original ESP32, PSRAM access is much slower than internal SRAM, so placing the working buffer in internal memory (`CONFIG_MICRO_FLAC_PREFER_INTERNAL=y`) is roughly 30-35% faster. On the ESP32-S3, the same switch saves only ~2% (16-bit) to ~4% (24-bit), and on the ESP32-P4 it is below 1%. The S3/P4 numbers above are measured with the default PSRAM placement, and switching to internal SRAM yields essentially the same range.
+On the original ESP32, PSRAM access is much slower than internal SRAM, so placing the working buffer in internal memory (`CONFIG_MICRO_FLAC_PREFER_INTERNAL=y`) is roughly 2.5x faster. The ESP32 rows use the dev board's default DIO 40 MHz flash, which also holds PSRAM to 40 MHz (80 MHz PSRAM requires 80 MHz flash). With QIO flash at 80 MHz, the full-frame decode reaches 25-28x real-time with internal memory and 13-15x with PSRAM. On the ESP32-S3, the same switch saves only ~2% (16-bit) to ~4% (24-bit), and on the ESP32-P4 it is below 1%. The S3/P4 numbers above are measured with the default PSRAM placement, and switching to internal SRAM yields essentially the same range.
 
 Performance varies based on:
 
