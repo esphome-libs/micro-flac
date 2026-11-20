@@ -151,14 +151,14 @@ RTF = decode_time / audio_duration
 
 | Device | Clock | Bit depth | Working buffer | Expected RTF | Real-time |
 |--------|-------|-----------|----------------|--------------|-----------|
-| ESP32 | 240 MHz | 16-bit | PSRAM | 0.105-0.130 | 8-10x |
-| ESP32 | 240 MHz | 16-bit | Internal | 0.044-0.050 | 20-23x |
+| ESP32 | 240 MHz | 16-bit | PSRAM | 0.071-0.086 | 12-14x |
+| ESP32 | 240 MHz | 16-bit | Internal | 0.038-0.043 | 23-26x |
 | ESP32-S3 | 240 MHz | 16-bit | PSRAM | 0.030-0.034 | 29-34x |
 | ESP32-S3 | 240 MHz | 24-bit | PSRAM | 0.043-0.054 | 19-23x |
 | ESP32-P4 | 360 MHz | 16-bit | PSRAM | 0.037-0.041 | 25-27x |
 | ESP32-P4 | 360 MHz | 24-bit | PSRAM | 0.050-0.058 | 17-20x |
 
-On the original ESP32, PSRAM access is much slower than internal SRAM, so placing the working buffer in internal memory (`CONFIG_MICRO_FLAC_PREFER_INTERNAL=y`) is roughly 2.5x faster. The ESP32 rows use the dev board's default DIO 40 MHz flash, which also holds PSRAM to 40 MHz (80 MHz PSRAM requires 80 MHz flash). With QIO flash at 80 MHz, the full-frame decode reaches 25-28x real-time with internal memory and 13-15x with PSRAM. On the ESP32-S3, the same switch saves only ~2% (16-bit) to ~4% (24-bit), and on the ESP32-P4 it is below 1%. The S3/P4 numbers above are measured with the default PSRAM placement, and switching to internal SRAM yields essentially the same range.
+On the original ESP32, PSRAM access is much slower than internal SRAM, so placing the working buffer in internal memory (`CONFIG_MICRO_FLAC_PREFER_INTERNAL=y`) is roughly 2x faster. The ESP32 rows run flash and PSRAM at 80 MHz; see [ESP32 flash and PSRAM clocks](#esp32-flash-and-psram-clocks). On the ESP32-S3, the same switch saves only ~2% (16-bit) to ~4% (24-bit), and on the ESP32-P4 it is below 1%. The S3/P4 numbers above are measured with the default PSRAM placement, and switching to internal SRAM yields essentially the same range.
 
 Performance varies based on:
 
@@ -177,6 +177,27 @@ Performance varies based on:
 - PSRAM enabled (for boards with PSRAM)
 - Main task stack: 8KB
 - Log level: WARN (reduced overhead)
+
+### ESP32 flash and PSRAM clocks
+
+The `esp32` environment runs flash at 80 MHz in DIO mode (`CONFIG_ESPTOOLPY_FLASHFREQ_80M` in `sdkconfig.defaults.esp32`, `board_build.f_flash` in `platformio.ini`), and PSRAM at 80 MHz. ESP-IDF only offers 80 MHz PSRAM with 80 MHz flash: at 40 MHz flash, `CONFIG_SPIRAM_SPEED_80M` silently falls back to 40 MHz.
+
+Measured on an ESP32 (rev v1.0), 16-bit clip, full frame, decode speed as a multiple of real time (`1 / RTF`), CRC off / on:
+
+| Working buffer | DIO 40 MHz    | DIO 80 MHz (default here) | QIO 80 MHz    |
+| -------------- | ------------- | ------------------------- | ------------- |
+| Internal       | 22.8x / 20.4x | 26.5x / 23.6x             | 28.6x / 25.3x |
+| PSRAM          | 9.6x / 7.8x   | 14.1x / 11.7x             | 15.1x / 12.7x |
+
+Flash speed matters here mostly because the benchmark reads its FLAC input from flash: a slice copied to internal RAM first decodes at the same speed under all three settings. With the working buffer in PSRAM, the 80 MHz PSRAM clock helps either way.
+
+Caveats before using these settings in an application:
+
+- The module and its flash chip must be rated for 80 MHz at the operating temperature ([ESP-IDF speed guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/performance/speed.html)). Espressif's common modules are; marginal third-party boards may not be.
+- Some ESP32-WROVER-B and -E batches run flash at 80 MHz but PSRAM only at 40 MHz, and fail at boot with "PSRAM chip not found or not supported" ([forum report](https://esp32.com/viewtopic.php?p=86792)). Set `CONFIG_SPIRAM_SPEED_40M=y` on those boards.
+- QIO is another 6-7% faster but needs the flash's WP/HD pins wired for quad mode, which DIO does not. In a QIO build `CONFIG_ESPTOOLPY_FLASHMODE` still reads "dio" (the bootloader switches modes); the boot log's `SPI Mode : QIO` confirms it.
+- With some 32 Mbit PSRAM chips at 80 MHz, ESP-IDF uses an SPI peripheral (HSPI or VSPI, `CONFIG_SPIRAM_OCCUPY_*_HOST`) to output the PSRAM clock, so the application cannot use it.
+- An existing generated `sdkconfig.esp32` keeps its old clock settings: delete it once to pick up these defaults.
 
 ## File Structure
 
@@ -205,6 +226,10 @@ decode_benchmark/
 
 - The ESP32 may not have enough RAM
 - Try a smaller FLAC clip or reduce block size
+
+### "PSRAM chip not found" on the ESP32
+
+- The board's PSRAM may not run at 80 MHz (see [ESP32 flash and PSRAM clocks](#esp32-flash-and-psram-clocks)): set `CONFIG_SPIRAM_SPEED_40M=y` in `sdkconfig.defaults.esp32` and delete the generated `sdkconfig.esp32`
 
 ### Very slow performance
 
