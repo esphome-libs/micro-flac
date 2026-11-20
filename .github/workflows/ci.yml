@@ -21,7 +21,7 @@ concurrency:
 jobs:
   pre-commit:
     name: Pre-commit checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,7 +34,7 @@ jobs:
 
   lint:
     name: Static analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,9 +45,9 @@ jobs:
         run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
 
       - name: Install clang-tidy
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-tidy-18
+        uses: ./.github/actions/apt-packages
+        with:
+          set: llvm
 
       - name: Run clang-tidy
         env:
@@ -56,7 +56,7 @@ jobs:
 
   include-check:
     name: Include check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,9 +67,9 @@ jobs:
         run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
 
       - name: Install clang-include-cleaner
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-tools-18
+        uses: ./.github/actions/apt-packages
+        with:
+          set: llvm
 
       - name: Run include check
         env:
@@ -78,10 +78,10 @@ jobs:
 
   cppcheck:
     name: Cppcheck
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
-      # Pin cppcheck and build it from source: ubuntu-latest's apt package lags
+      # Pin cppcheck and build it from source: Ubuntu's apt package lags
       # by several minor versions and produces different findings than the
       # version developers run locally (Homebrew). Bump deliberately, in step
       # with local installs. The build is cached, so only the first run per
@@ -118,7 +118,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,7 +142,7 @@ jobs:
 
   test:
     name: "Test: ${{ matrix.name }}"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     needs: build
     strategy:
@@ -193,9 +193,9 @@ jobs:
         run: git clone --depth 1 https://github.com/ietf-wg-cellar/flac-test-files.git test/flac-test-files
 
       - name: Install ffmpeg and flac
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg flac
+        uses: ./.github/actions/apt-packages
+        with:
+          set: ffmpeg
 
       - name: Run tests
         run: python3 host_examples/flac_to_wav/test_flac_decoder.py --categories subset --build-dir build ${{ matrix.args }}
@@ -204,7 +204,7 @@ jobs:
   # feature must still encode everything else correctly.
   encoder-test:
     name: "Test: FLAC encode (LPC=${{ matrix.lpc }}, partitions=${{ matrix.partitions }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -235,9 +235,9 @@ jobs:
         run: git clone --depth 1 https://github.com/ietf-wg-cellar/flac-test-files.git test/flac-test-files
 
       - name: Install ffmpeg and flac
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg flac
+        uses: ./.github/actions/apt-packages
+        with:
+          set: ffmpeg
 
       # The round trip decodes with flac_to_wav, so both CLIs are built.
       - name: Build flac_to_wav and wav_to_flac
@@ -257,7 +257,7 @@ jobs:
   # what a build leaves out).
   encoder-switches:
     name: "Encoder switches: LPC=${{ matrix.lpc }}"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -287,7 +287,7 @@ jobs:
 
   fuzz:
     name: Fuzz build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -298,9 +298,9 @@ jobs:
         run: git submodule update --init --depth 1 lib/micro-ogg-demuxer
 
       - name: Install clang
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang
+        uses: ./.github/actions/apt-packages
+        with:
+          set: clang
 
       # Standalone harness (no libFuzzer runtime needed) under ASan/UBSan.
       # Guards against harness compile/link regressions and gives the tree a
@@ -320,7 +320,7 @@ jobs:
 
   platformio:
     name: PlatformIO Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     strategy:
       matrix:
@@ -381,7 +381,7 @@ jobs:
       - encoder-switches
       - fuzz
       - platformio
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Fail if any required job failed or was cancelled
