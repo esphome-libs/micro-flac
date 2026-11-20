@@ -69,7 +69,10 @@ runs:
       with:
         path: ~/.cache/apt-debs/*.deb
         key: ${{ steps.key.outputs.key }}
-        restore-keys: ${{ steps.key.outputs.prefix }}
+        # Only jobs that don't save fall back to the previous image's entry. A saving run that
+        # did would store those same old debs under the new image's key, and repeated image
+        # updates would then carry them forward indefinitely, never picking up Ubuntu's updates.
+        restore-keys: ${{ inputs.save != 'true' && steps.key.outputs.prefix || '' }}
 
     - name: Install packages
       id: install
@@ -78,13 +81,15 @@ runs:
         PACKAGES: ${{ steps.key.outputs.packages }}
         RECOMMENDS: ${{ steps.key.outputs.recommends }}
         RESTORED_KEY: ${{ steps.restore.outputs.cache-matched-key }}
+        EXACT_HIT: ${{ steps.restore.outputs.cache-hit }}
+        SAVE: ${{ inputs.save }}
       run: |
         debs="${HOME}/.cache/apt-debs"
         read -ra package_list <<< "${PACKAGES}"
         # Every apt call is bounded, together well inside the jobs' timeouts; timeout runs under
-        # sudo so it can kill apt-get itself. The
-        # archives option is needed even where every .deb is named: without it, apt fails on a
-        # cached .deb that upgrades an installed package ("Pathname to install is not absolute").
+        # sudo so it can kill apt-get itself. The archives option is needed even where every
+        # .deb is named: without it, apt fails on a cached .deb that upgrades an installed
+        # package ("Pathname to install is not absolute").
         apt_get() {
           local limit="$1"
           shift
@@ -117,6 +122,13 @@ runs:
           download
         fi
         apt_get 120 install --no-download "${package_list[@]}"
+
+        # A broken exact entry can't be replaced (cache keys are immutable), so every job would
+        # keep restoring it and falling back to the mirror. Fail the seeding run so it gets fixed.
+        if [ "${EXACT_HIT}" = "true" ] && [ "${SAVE}" = "true" ]; then
+          echo "::error::Cache entry ${RESTORED_KEY} does not install. Bump cache_version in this action, or delete the entry with: gh cache delete ${RESTORED_KEY}"
+          exit 1
+        fi
 
         # Nothing to save when the image already had every package.
         if compgen -G "${debs}/*.deb" > /dev/null; then
