@@ -8,7 +8,7 @@ name: Seed apt cache
 # on a cache hit it only restores and reinstalls, which checks the entry still works.
 on:
   push:
-    branches: [main, ci-cache-apt-packages]  # TEMPORARY: test seeding on this branch
+    branches: [main]
   schedule:
     - cron: '17 6 * * *'
   # Manual "Run workflow" from the Actions tab.
