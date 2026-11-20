@@ -33,6 +33,16 @@
  * - Generic fallback for orders > 12
  * - Proper carry propagation for 64-bit accumulation
  * - Efficient 64-bit shifting using SRC instruction
+ *
+ * Scheduling (measured with CCOUNT on both cores):
+ * - mull/mulsh results: one-cycle stall if the next instruction uses them, on LX6 and LX7
+ * - l32i/l16si results: one-cycle stall at distance 1 on LX7 (ESP32-S3); on LX6 (ESP32) two
+ *   cycles at distance 1 and one at distance 2
+ * - loads are issued at least 3 instructions before their first use and products at least 2
+ *   before theirs, so the loops run stall-free on both cores
+ * - each sample's first product is written straight into the accumulator (no clearing), and
+ *   the next sample's first input is loaded at the end of the current iteration
+ * - MAC 0 can never carry, so it also skips the carry check
  */
 
 #include "lpc_xtensa.h"
@@ -47,7 +57,9 @@
 //   low_prod is clobbered
 //
 // On LX7 (ESP32-S3): branchless saltu instruction
-// On LX6 (ESP32):    bgeu branch with GAS numeric local label (safe in macros)
+// On LX6 (ESP32):    bgeu branch with GAS numeric local label (safe in macros).
+//                    The branch is taken when there is no carry (3 cycles); carries occur in
+//                    about half of real-audio MACs, so neither branch direction is cheaper
 // ============================================================================
 #if (FLAC_LPC_HAVE_SALTU == 1)
 .macro MAC64_CARRY acc_low, acc_high, low_prod, high_prod
@@ -126,9 +138,9 @@ restore_lpc_64bit_asm:
 //   a2:      buffer pointer (advanced each outer iteration)
 //   a3:      64-bit accumulator low
 //   a4:      64-bit accumulator high
-//   a5:      interleaved sample load A
-//   a6:      interleaved sample load B / shift result
-//   a7:      temporary mull low result
+//   a5:      interleaved sample load A (holds the next sample's buffer[0] across iterations)
+//   a6:      interleaved sample load B
+//   a7:      temporary mull low result / shift result
 //
 // Register-cached orders 1-8:
 //   a8-a15:  coefficients 0-7
@@ -142,29 +154,29 @@ restore_lpc_64bit_asm:
 //   mull  a7, a5, a[coef]    -- low product into a7 (a5 unchanged)
 //   mulsh a5, a5, a[coef]    -- high product overwrites sample in a5
 //   accumulate a7 (low) into a3, a5 (high) into a4 with carry propagation
+// MAC 0 writes its product straight into a3/a4 instead.
 // ============================================================================
 
 // ============================================================================
-// Order 1: One coefficient (register-cached)
+// Order 1: One coefficient (register-cached, previous output carried in a5)
 // ============================================================================
 .align 4
 .L64_order_1:
-    l16si a8, a4, 0                 // coef[0]
+    l16si a8, a4, 0                // coef[0]
+    l32i a5, a2, 0                 // buffer[0]; afterwards a5 holds the previous output
 
     loop a7, .L64_loop_1_end
 
-    l32i a5, a2, 0                 // buffer[i]
-
     // Single MAC: multiply directly into accumulator registers (no carry needed)
-    l32i a6, a2, 4                 // Pre-load residual (hides load-use latency on a5)
     mull a3, a5, a8                // acc_low = low product
+    l32i a6, a2, 4                 // Load residual
     mulsh a4, a5, a8               // acc_high = high product
+    addi a2, a2, 4                 // Advance buffer pointer (fills multiply-use latency)
 
     // Shift and store
     src a5, a4, a3                 // (acc_high:acc_low) >> shift
-    add a6, a6, a5
-    s32i a6, a2, 4
-    addi a2, a2, 4
+    add a5, a6, a5
+    s32i a5, a2, 0                 // Store result (next iteration multiplies it)
 .L64_loop_1_end:
     j .L64_done
 
@@ -173,31 +185,28 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_2:
-    l16si a8, a4, 0                 // coef[0]
-    l16si a9, a4, 2                 // coef[1]
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_2_end
-    movi a3, 0                     // acc_low = 0
-    movi a4, 0                     // acc_high = 0
 
-    l32i a5, a2, 0                 // buffer[i]
+    // MAC 0: a5 * coef[0], straight into the accumulator
+    l32i a6, a2, 4                 // Pre-load buffer[1]
+    mull a3, a5, a8                // acc_low = low product
+    mulsh a4, a5, a8               // acc_high = high product
 
-    // MAC 0: a5 * coef[0]
-    l32i a6, a2, 4                 // Pre-load buffer[i+1]
-    mull a7, a5, a8
-    mulsh a5, a5, a8
-    MAC64_CARRY a3, a4, a7, a5
-
-    // MAC 1: a6 * coef[1]
+    // MAC 1: a6 * coef[1] - last
+    l32i a5, a2, 8                 // Load residual
     mull a7, a6, a9
     mulsh a6, a6, a9
     MAC64_CARRY a3, a4, a7, a6
 
     // Shift and store
-    l32i a5, a2, 8                 // Load residual
-    src a6, a4, a3
-    add a5, a5, a6
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a5, a5, a7
     s32i a5, a2, 8
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_2_end:
     j .L64_done
@@ -207,38 +216,35 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_3:
-    l16si a8, a4, 0                 // coef[0]
-    l16si a9, a4, 2                 // coef[1]
-    l16si a10, a4, 4                // coef[2]
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l16si a10, a4, 4               // coef[2]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_3_end
-    movi a3, 0
-    movi a4, 0
 
-    l32i a5, a2, 0                 // buffer[i]
-
-    // MAC 0: a5 * coef[0]
-    l32i a6, a2, 4                 // Pre-load buffer[i+1]
-    mull a7, a5, a8
-    mulsh a5, a5, a8
-    MAC64_CARRY a3, a4, a7, a5
+    // MAC 0: a5 * coef[0], straight into the accumulator
+    l32i a6, a2, 4                 // Pre-load buffer[1]
+    mull a3, a5, a8                // acc_low = low product
+    mulsh a4, a5, a8               // acc_high = high product
 
     // MAC 1: a6 * coef[1]
-    l32i a5, a2, 8                 // Pre-load buffer[i+2]
+    l32i a5, a2, 8                 // Pre-load buffer[2]
     mull a7, a6, a9
     mulsh a6, a6, a9
     MAC64_CARRY a3, a4, a7, a6
 
-    // MAC 2: a5 * coef[2]
+    // MAC 2: a5 * coef[2] - last
+    l32i a6, a2, 12                // Load residual
     mull a7, a5, a10
     mulsh a5, a5, a10
     MAC64_CARRY a3, a4, a7, a5
 
     // Shift and store
-    l32i a5, a2, 12                // Load residual
-    src a6, a4, a3
-    add a5, a5, a6
-    s32i a5, a2, 12
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a6, a6, a7
+    s32i a6, a2, 12
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_3_end:
     j .L64_done
@@ -248,45 +254,42 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_4:
-    l16si a8, a4, 0                 // coef[0]
-    l16si a9, a4, 2                 // coef[1]
-    l16si a10, a4, 4                // coef[2]
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l16si a10, a4, 4               // coef[2]
     l16si a11, a4, 6               // coef[3]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_4_end
-    movi a3, 0
-    movi a4, 0
 
-    l32i a5, a2, 0                 // buffer[i]
-
-    // MAC 0: a5 * coef[0]
-    l32i a6, a2, 4                 // Pre-load buffer[i+1]
-    mull a7, a5, a8
-    mulsh a5, a5, a8
-    MAC64_CARRY a3, a4, a7, a5
+    // MAC 0: a5 * coef[0], straight into the accumulator
+    l32i a6, a2, 4                 // Pre-load buffer[1]
+    mull a3, a5, a8                // acc_low = low product
+    mulsh a4, a5, a8               // acc_high = high product
 
     // MAC 1: a6 * coef[1]
-    l32i a5, a2, 8                 // Pre-load buffer[i+2]
+    l32i a5, a2, 8                 // Pre-load buffer[2]
     mull a7, a6, a9
     mulsh a6, a6, a9
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 2: a5 * coef[2]
-    l32i a6, a2, 12                // Pre-load buffer[i+3]
+    l32i a6, a2, 12                // Pre-load buffer[3]
     mull a7, a5, a10
     mulsh a5, a5, a10
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 3: a6 * coef[3]
+    // MAC 3: a6 * coef[3] - last
+    l32i a5, a2, 16                // Load residual
     mull a7, a6, a11
     mulsh a6, a6, a11
     MAC64_CARRY a3, a4, a7, a6
 
     // Shift and store
-    l32i a5, a2, 16                // Load residual
-    src a6, a4, a3
-    add a5, a5, a6
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a5, a5, a7
     s32i a5, a2, 16
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_4_end:
     j .L64_done
@@ -296,52 +299,49 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_5:
-    l16si a8, a4, 0                 // coef[0]
-    l16si a9, a4, 2                 // coef[1]
-    l16si a10, a4, 4                // coef[2]
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l16si a10, a4, 4               // coef[2]
     l16si a11, a4, 6               // coef[3]
     l16si a12, a4, 8               // coef[4]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_5_end
-    movi a3, 0
-    movi a4, 0
 
-    l32i a5, a2, 0                 // buffer[i]
-
-    // MAC 0: a5 * coef[0]
-    l32i a6, a2, 4                 // Pre-load buffer[i+1]
-    mull a7, a5, a8
-    mulsh a5, a5, a8
-    MAC64_CARRY a3, a4, a7, a5
+    // MAC 0: a5 * coef[0], straight into the accumulator
+    l32i a6, a2, 4                 // Pre-load buffer[1]
+    mull a3, a5, a8                // acc_low = low product
+    mulsh a4, a5, a8               // acc_high = high product
 
     // MAC 1: a6 * coef[1]
-    l32i a5, a2, 8                 // Pre-load buffer[i+2]
+    l32i a5, a2, 8                 // Pre-load buffer[2]
     mull a7, a6, a9
     mulsh a6, a6, a9
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 2: a5 * coef[2]
-    l32i a6, a2, 12                // Pre-load buffer[i+3]
+    l32i a6, a2, 12                // Pre-load buffer[3]
     mull a7, a5, a10
     mulsh a5, a5, a10
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 3: a6 * coef[3]
-    l32i a5, a2, 16                // Pre-load buffer[i+4]
+    l32i a5, a2, 16                // Pre-load buffer[4]
     mull a7, a6, a11
     mulsh a6, a6, a11
     MAC64_CARRY a3, a4, a7, a6
 
-    // MAC 4: a5 * coef[4]
+    // MAC 4: a5 * coef[4] - last
+    l32i a6, a2, 20                // Load residual
     mull a7, a5, a12
     mulsh a5, a5, a12
     MAC64_CARRY a3, a4, a7, a5
 
     // Shift and store
-    l32i a5, a2, 20                // Load residual
-    src a6, a4, a3
-    add a5, a5, a6
-    s32i a5, a2, 20
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a6, a6, a7
+    s32i a6, a2, 20
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_5_end:
     j .L64_done
@@ -351,59 +351,56 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_6:
-    l16si a8, a4, 0                 // coef[0]
-    l16si a9, a4, 2                 // coef[1]
-    l16si a10, a4, 4                // coef[2]
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l16si a10, a4, 4               // coef[2]
     l16si a11, a4, 6               // coef[3]
     l16si a12, a4, 8               // coef[4]
-    l16si a13, a4, 10               // coef[5]
+    l16si a13, a4, 10              // coef[5]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_6_end
-    movi a3, 0
-    movi a4, 0
 
-    l32i a5, a2, 0                 // buffer[i]
-
-    // MAC 0: a5 * coef[0]
-    l32i a6, a2, 4                 // Pre-load buffer[i+1]
-    mull a7, a5, a8
-    mulsh a5, a5, a8
-    MAC64_CARRY a3, a4, a7, a5
+    // MAC 0: a5 * coef[0], straight into the accumulator
+    l32i a6, a2, 4                 // Pre-load buffer[1]
+    mull a3, a5, a8                // acc_low = low product
+    mulsh a4, a5, a8               // acc_high = high product
 
     // MAC 1: a6 * coef[1]
-    l32i a5, a2, 8                 // Pre-load buffer[i+2]
+    l32i a5, a2, 8                 // Pre-load buffer[2]
     mull a7, a6, a9
     mulsh a6, a6, a9
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 2: a5 * coef[2]
-    l32i a6, a2, 12                // Pre-load buffer[i+3]
+    l32i a6, a2, 12                // Pre-load buffer[3]
     mull a7, a5, a10
     mulsh a5, a5, a10
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 3: a6 * coef[3]
-    l32i a5, a2, 16                // Pre-load buffer[i+4]
+    l32i a5, a2, 16                // Pre-load buffer[4]
     mull a7, a6, a11
     mulsh a6, a6, a11
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 4: a5 * coef[4]
-    l32i a6, a2, 20                // Pre-load buffer[i+5]
+    l32i a6, a2, 20                // Pre-load buffer[5]
     mull a7, a5, a12
     mulsh a5, a5, a12
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 5: a6 * coef[5]
+    // MAC 5: a6 * coef[5] - last
+    l32i a5, a2, 24                // Load residual
     mull a7, a6, a13
     mulsh a6, a6, a13
     MAC64_CARRY a3, a4, a7, a6
 
     // Shift and store
-    l32i a5, a2, 24                // Load residual
-    src a6, a4, a3
-    add a5, a5, a6
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a5, a5, a7
     s32i a5, a2, 24
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_6_end:
     j .L64_done
@@ -413,66 +410,63 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_7:
-    l16si a8, a4, 0                 // coef[0]
-    l16si a9, a4, 2                 // coef[1]
-    l16si a10, a4, 4                // coef[2]
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l16si a10, a4, 4               // coef[2]
     l16si a11, a4, 6               // coef[3]
     l16si a12, a4, 8               // coef[4]
-    l16si a13, a4, 10               // coef[5]
-    l16si a14, a4, 12               // coef[6]
+    l16si a13, a4, 10              // coef[5]
+    l16si a14, a4, 12              // coef[6]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_7_end
-    movi a3, 0
-    movi a4, 0
 
-    l32i a5, a2, 0                 // buffer[i]
-
-    // MAC 0: a5 * coef[0]
-    l32i a6, a2, 4                 // Pre-load buffer[i+1]
-    mull a7, a5, a8
-    mulsh a5, a5, a8
-    MAC64_CARRY a3, a4, a7, a5
+    // MAC 0: a5 * coef[0], straight into the accumulator
+    l32i a6, a2, 4                 // Pre-load buffer[1]
+    mull a3, a5, a8                // acc_low = low product
+    mulsh a4, a5, a8               // acc_high = high product
 
     // MAC 1: a6 * coef[1]
-    l32i a5, a2, 8                 // Pre-load buffer[i+2]
+    l32i a5, a2, 8                 // Pre-load buffer[2]
     mull a7, a6, a9
     mulsh a6, a6, a9
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 2: a5 * coef[2]
-    l32i a6, a2, 12                // Pre-load buffer[i+3]
+    l32i a6, a2, 12                // Pre-load buffer[3]
     mull a7, a5, a10
     mulsh a5, a5, a10
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 3: a6 * coef[3]
-    l32i a5, a2, 16                // Pre-load buffer[i+4]
+    l32i a5, a2, 16                // Pre-load buffer[4]
     mull a7, a6, a11
     mulsh a6, a6, a11
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 4: a5 * coef[4]
-    l32i a6, a2, 20                // Pre-load buffer[i+5]
+    l32i a6, a2, 20                // Pre-load buffer[5]
     mull a7, a5, a12
     mulsh a5, a5, a12
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 5: a6 * coef[5]
-    l32i a5, a2, 24                // Pre-load buffer[i+6]
+    l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a13
     mulsh a6, a6, a13
     MAC64_CARRY a3, a4, a7, a6
 
-    // MAC 6: a5 * coef[6]
+    // MAC 6: a5 * coef[6] - last
+    l32i a6, a2, 28                // Load residual
     mull a7, a5, a14
     mulsh a5, a5, a14
     MAC64_CARRY a3, a4, a7, a5
 
     // Shift and store
-    l32i a5, a2, 28                // Load residual
-    src a6, a4, a3
-    add a5, a5, a6
-    s32i a5, a2, 28
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a6, a6, a7
+    s32i a6, a2, 28
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_7_end:
     j .L64_done
@@ -482,73 +476,70 @@ restore_lpc_64bit_asm:
 // ============================================================================
 .align 4
 .L64_order_8:
-    l16si a8, a4, 0                 // coef[0]
-    l16si a9, a4, 2                 // coef[1]
-    l16si a10, a4, 4                // coef[2]
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l16si a10, a4, 4               // coef[2]
     l16si a11, a4, 6               // coef[3]
     l16si a12, a4, 8               // coef[4]
-    l16si a13, a4, 10               // coef[5]
-    l16si a14, a4, 12               // coef[6]
-    l16si a15, a4, 14               // coef[7]
+    l16si a13, a4, 10              // coef[5]
+    l16si a14, a4, 12              // coef[6]
+    l16si a15, a4, 14              // coef[7]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_8_end
-    movi a3, 0
-    movi a4, 0
 
-    l32i a5, a2, 0                 // buffer[i]
-
-    // MAC 0: a5 * coef[0]
-    l32i a6, a2, 4                 // Pre-load buffer[i+1]
-    mull a7, a5, a8
-    mulsh a5, a5, a8
-    MAC64_CARRY a3, a4, a7, a5
+    // MAC 0: a5 * coef[0], straight into the accumulator
+    l32i a6, a2, 4                 // Pre-load buffer[1]
+    mull a3, a5, a8                // acc_low = low product
+    mulsh a4, a5, a8               // acc_high = high product
 
     // MAC 1: a6 * coef[1]
-    l32i a5, a2, 8                 // Pre-load buffer[i+2]
+    l32i a5, a2, 8                 // Pre-load buffer[2]
     mull a7, a6, a9
     mulsh a6, a6, a9
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 2: a5 * coef[2]
-    l32i a6, a2, 12                // Pre-load buffer[i+3]
+    l32i a6, a2, 12                // Pre-load buffer[3]
     mull a7, a5, a10
     mulsh a5, a5, a10
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 3: a6 * coef[3]
-    l32i a5, a2, 16                // Pre-load buffer[i+4]
+    l32i a5, a2, 16                // Pre-load buffer[4]
     mull a7, a6, a11
     mulsh a6, a6, a11
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 4: a5 * coef[4]
-    l32i a6, a2, 20                // Pre-load buffer[i+5]
+    l32i a6, a2, 20                // Pre-load buffer[5]
     mull a7, a5, a12
     mulsh a5, a5, a12
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 5: a6 * coef[5]
-    l32i a5, a2, 24                // Pre-load buffer[i+6]
+    l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a13
     mulsh a6, a6, a13
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 6: a5 * coef[6]
-    l32i a6, a2, 28                // Pre-load buffer[i+7]
+    l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a14
     mulsh a5, a5, a14
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 7: a6 * coef[7]
+    // MAC 7: a6 * coef[7] - last
+    l32i a5, a2, 32                // Load residual
     mull a7, a6, a15
     mulsh a6, a6, a15
     MAC64_CARRY a3, a4, a7, a6
 
     // Shift and store
-    l32i a5, a2, 32                // Load residual
-    src a6, a4, a3
-    add a5, a5, a6
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a5, a5, a7
     s32i a5, a2, 32
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_8_end:
     j .L64_done
@@ -560,25 +551,21 @@ restore_lpc_64bit_asm:
 .L64_order_9:
     // Cache coef[0]-coef[5] in registers, keep pointer for coef[6]-coef[8]
     mov a9, a4                     // Save coef pointer for tail section
-    l16si a10, a4, 0                // coef[0]
-    l16si a11, a4, 2                // coef[1]
-    l16si a12, a4, 4                // coef[2]
+    l16si a10, a4, 0               // coef[0]
+    l16si a11, a4, 2               // coef[1]
+    l16si a12, a4, 4               // coef[2]
     l16si a13, a4, 6               // coef[3]
     l16si a14, a4, 8               // coef[4]
-    l16si a15, a4, 10               // coef[5]
+    l16si a15, a4, 10              // coef[5]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_9_end
-    movi a3, 0                     // acc_low = 0
-    movi a4, 0                     // acc_high = 0
-
-    l32i a5, a2, 0                 // buffer[0]
 
     // === Cached section: MACs 0-5 (register coefficients) ===
-    // MAC 0: a5 * coef[0]
+    // MAC 0: a5 * coef[0], straight into the accumulator
     l32i a6, a2, 4                 // Pre-load buffer[1]
-    mull a7, a5, a10
-    mulsh a5, a5, a10
-    MAC64_CARRY a3, a4, a7, a5
+    mull a3, a5, a10               // acc_low = low product
+    mulsh a4, a5, a10              // acc_high = high product
 
     // MAC 1: a6 * coef[1]
     l32i a5, a2, 8                 // Pre-load buffer[2]
@@ -604,11 +591,11 @@ restore_lpc_64bit_asm:
     mulsh a5, a5, a14
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 5: a6 * coef[5] (last cached, transition to tail)
+    // MAC 5: a6 * coef[5]
     l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a15
     mulsh a6, a6, a15
-    l16si a8, a9, 12                // Pre-load coef[6]
+    l16si a8, a9, 12               // Pre-load coef[6]
     MAC64_CARRY a3, a4, a7, a6
 
     // === Tail section: MACs 6-8 (memory-loaded coefficients from a9) ===
@@ -616,26 +603,27 @@ restore_lpc_64bit_asm:
     l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l16si a8, a9, 14                // Pre-load coef[7]
+    l16si a8, a9, 14               // Pre-load coef[7]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 7: a6 * coef[7]
     l32i a5, a2, 32                // Pre-load buffer[8]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l16si a8, a9, 16                // Pre-load coef[8]
+    l16si a8, a9, 16               // Pre-load coef[8]
     MAC64_CARRY a3, a4, a7, a6
 
-    // MAC 8: a5 * coef[8] - last, no pre-loads
+    // MAC 8: a5 * coef[8] - last
+    l32i a6, a2, 36                // Load residual
     mull a7, a5, a8
     mulsh a5, a5, a8
     MAC64_CARRY a3, a4, a7, a5
 
     // Shift and store
-    l32i a5, a2, 36                // Load residual (9*4 = 36)
-    src a6, a4, a3
-    add a5, a5, a6
-    s32i a5, a2, 36
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a6, a6, a7
+    s32i a6, a2, 36
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_9_end:
     j .L64_done
@@ -647,25 +635,21 @@ restore_lpc_64bit_asm:
 .L64_order_10:
     // Cache coef[0]-coef[5] in registers, keep pointer for coef[6]-coef[9]
     mov a9, a4                     // Save coef pointer for tail section
-    l16si a10, a4, 0                // coef[0]
-    l16si a11, a4, 2                // coef[1]
-    l16si a12, a4, 4                // coef[2]
+    l16si a10, a4, 0               // coef[0]
+    l16si a11, a4, 2               // coef[1]
+    l16si a12, a4, 4               // coef[2]
     l16si a13, a4, 6               // coef[3]
     l16si a14, a4, 8               // coef[4]
-    l16si a15, a4, 10               // coef[5]
+    l16si a15, a4, 10              // coef[5]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_10_end
-    movi a3, 0                     // acc_low = 0
-    movi a4, 0                     // acc_high = 0
-
-    l32i a5, a2, 0                 // buffer[0]
 
     // === Cached section: MACs 0-5 (register coefficients) ===
-    // MAC 0: a5 * coef[0]
+    // MAC 0: a5 * coef[0], straight into the accumulator
     l32i a6, a2, 4                 // Pre-load buffer[1]
-    mull a7, a5, a10
-    mulsh a5, a5, a10
-    MAC64_CARRY a3, a4, a7, a5
+    mull a3, a5, a10               // acc_low = low product
+    mulsh a4, a5, a10              // acc_high = high product
 
     // MAC 1: a6 * coef[1]
     l32i a5, a2, 8                 // Pre-load buffer[2]
@@ -691,11 +675,11 @@ restore_lpc_64bit_asm:
     mulsh a5, a5, a14
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 5: a6 * coef[5] (last cached, transition to tail)
+    // MAC 5: a6 * coef[5]
     l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a15
     mulsh a6, a6, a15
-    l16si a8, a9, 12                // Pre-load coef[6]
+    l16si a8, a9, 12               // Pre-load coef[6]
     MAC64_CARRY a3, a4, a7, a6
 
     // === Tail section: MACs 6-9 (memory-loaded coefficients from a9) ===
@@ -703,33 +687,34 @@ restore_lpc_64bit_asm:
     l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l16si a8, a9, 14                // Pre-load coef[7]
+    l16si a8, a9, 14               // Pre-load coef[7]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 7: a6 * coef[7]
     l32i a5, a2, 32                // Pre-load buffer[8]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l16si a8, a9, 16                // Pre-load coef[8]
+    l16si a8, a9, 16               // Pre-load coef[8]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 8: a5 * coef[8]
     l32i a6, a2, 36                // Pre-load buffer[9]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l16si a8, a9, 18                // Pre-load coef[9]
+    l16si a8, a9, 18               // Pre-load coef[9]
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 9: a6 * coef[9] - last, no pre-loads
+    // MAC 9: a6 * coef[9] - last
+    l32i a5, a2, 40                // Load residual
     mull a7, a6, a8
     mulsh a6, a6, a8
     MAC64_CARRY a3, a4, a7, a6
 
     // Shift and store
-    l32i a5, a2, 40                // Load residual (10*4 = 40)
-    src a6, a4, a3
-    add a5, a5, a6
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a5, a5, a7
     s32i a5, a2, 40
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_10_end:
     j .L64_done
@@ -741,25 +726,21 @@ restore_lpc_64bit_asm:
 .L64_order_11:
     // Cache coef[0]-coef[5] in registers, keep pointer for coef[6]-coef[10]
     mov a9, a4                     // Save coef pointer for tail section
-    l16si a10, a4, 0                // coef[0]
-    l16si a11, a4, 2                // coef[1]
-    l16si a12, a4, 4                // coef[2]
+    l16si a10, a4, 0               // coef[0]
+    l16si a11, a4, 2               // coef[1]
+    l16si a12, a4, 4               // coef[2]
     l16si a13, a4, 6               // coef[3]
     l16si a14, a4, 8               // coef[4]
-    l16si a15, a4, 10               // coef[5]
+    l16si a15, a4, 10              // coef[5]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_11_end
-    movi a3, 0                     // acc_low = 0
-    movi a4, 0                     // acc_high = 0
-
-    l32i a5, a2, 0                 // buffer[0]
 
     // === Cached section: MACs 0-5 (register coefficients) ===
-    // MAC 0: a5 * coef[0]
+    // MAC 0: a5 * coef[0], straight into the accumulator
     l32i a6, a2, 4                 // Pre-load buffer[1]
-    mull a7, a5, a10
-    mulsh a5, a5, a10
-    MAC64_CARRY a3, a4, a7, a5
+    mull a3, a5, a10               // acc_low = low product
+    mulsh a4, a5, a10              // acc_high = high product
 
     // MAC 1: a6 * coef[1]
     l32i a5, a2, 8                 // Pre-load buffer[2]
@@ -785,11 +766,11 @@ restore_lpc_64bit_asm:
     mulsh a5, a5, a14
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 5: a6 * coef[5] (last cached, transition to tail)
+    // MAC 5: a6 * coef[5]
     l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a15
     mulsh a6, a6, a15
-    l16si a8, a9, 12                // Pre-load coef[6]
+    l16si a8, a9, 12               // Pre-load coef[6]
     MAC64_CARRY a3, a4, a7, a6
 
     // === Tail section: MACs 6-10 (memory-loaded coefficients from a9) ===
@@ -797,40 +778,41 @@ restore_lpc_64bit_asm:
     l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l16si a8, a9, 14                // Pre-load coef[7]
+    l16si a8, a9, 14               // Pre-load coef[7]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 7: a6 * coef[7]
     l32i a5, a2, 32                // Pre-load buffer[8]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l16si a8, a9, 16                // Pre-load coef[8]
+    l16si a8, a9, 16               // Pre-load coef[8]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 8: a5 * coef[8]
     l32i a6, a2, 36                // Pre-load buffer[9]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l16si a8, a9, 18                // Pre-load coef[9]
+    l16si a8, a9, 18               // Pre-load coef[9]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 9: a6 * coef[9]
     l32i a5, a2, 40                // Pre-load buffer[10]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l16si a8, a9, 20                // Pre-load coef[10]
+    l16si a8, a9, 20               // Pre-load coef[10]
     MAC64_CARRY a3, a4, a7, a6
 
-    // MAC 10: a5 * coef[10] - last, no pre-loads
+    // MAC 10: a5 * coef[10] - last
+    l32i a6, a2, 44                // Load residual
     mull a7, a5, a8
     mulsh a5, a5, a8
     MAC64_CARRY a3, a4, a7, a5
 
     // Shift and store
-    l32i a5, a2, 44                // Load residual (11*4 = 44)
-    src a6, a4, a3
-    add a5, a5, a6
-    s32i a5, a2, 44
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a6, a6, a7
+    s32i a6, a2, 44
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_11_end:
     j .L64_done
@@ -842,25 +824,21 @@ restore_lpc_64bit_asm:
 .L64_order_12:
     // Cache coef[0]-coef[5] in registers, keep pointer for coef[6]-coef[11]
     mov a9, a4                     // Save coef pointer for tail section
-    l16si a10, a4, 0                // coef[0]
-    l16si a11, a4, 2                // coef[1]
-    l16si a12, a4, 4                // coef[2]
+    l16si a10, a4, 0               // coef[0]
+    l16si a11, a4, 2               // coef[1]
+    l16si a12, a4, 4               // coef[2]
     l16si a13, a4, 6               // coef[3]
     l16si a14, a4, 8               // coef[4]
-    l16si a15, a4, 10               // coef[5]
+    l16si a15, a4, 10              // coef[5]
+    l32i a5, a2, 0                 // buffer[0] of the first sample
 
     loop a7, .L64_loop_12_end
-    movi a3, 0                     // acc_low = 0
-    movi a4, 0                     // acc_high = 0
-
-    l32i a5, a2, 0                 // buffer[0]
 
     // === Cached section: MACs 0-5 (register coefficients) ===
-    // MAC 0: a5 * coef[0]
+    // MAC 0: a5 * coef[0], straight into the accumulator
     l32i a6, a2, 4                 // Pre-load buffer[1]
-    mull a7, a5, a10
-    mulsh a5, a5, a10
-    MAC64_CARRY a3, a4, a7, a5
+    mull a3, a5, a10               // acc_low = low product
+    mulsh a4, a5, a10              // acc_high = high product
 
     // MAC 1: a6 * coef[1]
     l32i a5, a2, 8                 // Pre-load buffer[2]
@@ -886,11 +864,11 @@ restore_lpc_64bit_asm:
     mulsh a5, a5, a14
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 5: a6 * coef[5] (last cached, transition to tail)
+    // MAC 5: a6 * coef[5]
     l32i a5, a2, 24                // Pre-load buffer[6]
     mull a7, a6, a15
     mulsh a6, a6, a15
-    l16si a8, a9, 12                // Pre-load coef[6]
+    l16si a8, a9, 12               // Pre-load coef[6]
     MAC64_CARRY a3, a4, a7, a6
 
     // === Tail section: MACs 6-11 (memory-loaded coefficients from a9) ===
@@ -898,47 +876,48 @@ restore_lpc_64bit_asm:
     l32i a6, a2, 28                // Pre-load buffer[7]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l16si a8, a9, 14                // Pre-load coef[7]
+    l16si a8, a9, 14               // Pre-load coef[7]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 7: a6 * coef[7]
     l32i a5, a2, 32                // Pre-load buffer[8]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l16si a8, a9, 16                // Pre-load coef[8]
+    l16si a8, a9, 16               // Pre-load coef[8]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 8: a5 * coef[8]
     l32i a6, a2, 36                // Pre-load buffer[9]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l16si a8, a9, 18                // Pre-load coef[9]
+    l16si a8, a9, 18               // Pre-load coef[9]
     MAC64_CARRY a3, a4, a7, a5
 
     // MAC 9: a6 * coef[9]
     l32i a5, a2, 40                // Pre-load buffer[10]
     mull a7, a6, a8
     mulsh a6, a6, a8
-    l16si a8, a9, 20                // Pre-load coef[10]
+    l16si a8, a9, 20               // Pre-load coef[10]
     MAC64_CARRY a3, a4, a7, a6
 
     // MAC 10: a5 * coef[10]
     l32i a6, a2, 44                // Pre-load buffer[11]
     mull a7, a5, a8
     mulsh a5, a5, a8
-    l16si a8, a9, 22                // Pre-load coef[11]
+    l16si a8, a9, 22               // Pre-load coef[11]
     MAC64_CARRY a3, a4, a7, a5
 
-    // MAC 11: a6 * coef[11] - last, no pre-loads
+    // MAC 11: a6 * coef[11] - last
+    l32i a5, a2, 48                // Load residual
     mull a7, a6, a8
     mulsh a6, a6, a8
     MAC64_CARRY a3, a4, a7, a6
 
     // Shift and store
-    l32i a5, a2, 48                // Load residual (12*4 = 48)
-    src a6, a4, a3
-    add a5, a5, a6
+    src a7, a4, a3                 // (acc_high:acc_low) >> shift
+    add a5, a5, a7
     s32i a5, a2, 48
+    l32i a5, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .L64_loop_12_end:
     j .L64_done
@@ -957,8 +936,8 @@ restore_lpc_64bit_asm:
     //   a10 = working buffer pointer (advances each outer iteration)
     //   a11 = sum_low
     //   a12 = sum_high
-    //   a13 = j counter / shifted result temp
-    //   a14 = inner buffer position / address temp
+    //   a13 = coefficient pointer for the inner loop / shifted result temp
+    //   a14 = buffer position for the inner loop
     //   a15 = buffer value / residual temp
     //   a3, a9 = temps
     mov a10, a2                    // Working buffer pointer
@@ -966,33 +945,29 @@ restore_lpc_64bit_asm:
 .L64_outer_generic:
     movi a11, 0                    // sum_low = 0
     movi a12, 0                    // sum_high = 0
-    movi a13, 0                    // j = 0 (inner loop counter)
-    mov a14, a10                   // Current buffer position for inner loop
+    mov a13, a4                    // &coef[0]
+    mov a14, a10                   // &buffer[i]
 
     loop a5, .L64_inner_generic_end
 .L64_inner_generic:
+    l16si a3, a13, 0               // coef[j]
     l32i a15, a14, 0               // buffer[i+j]
-    addx2 a9, a13, a4              // &coef[j]
-    l16si a3, a9, 0                 // coef[j]
-    addi a13, a13, 1               // j++ (fill: resolves a3 load-use)
+    addi a13, a13, 2               // Advance coefficient pointer
+    addi a14, a14, 4               // Advance buffer pointer
 
     // 64-bit multiplication and accumulation
-    mull a9, a15, a3               // Low 32 bits (no stall on a3)
-    mulsh a3, a15, a3              // High 32 bits (fill: separates mull from consumer)
+    mull a9, a15, a3               // Low 32 bits (a3 4 back, a15 3 back)
+    mulsh a3, a15, a3              // High 32 bits
     MAC64_CARRY a11, a12, a9, a3
-
-    addi a14, a14, 4               // Advance buffer pointer
 .L64_inner_generic_end:
 
     // Shift 64-bit result and add to residual
-    addx4 a14, a5, a10             // &buffer[i + order]
-    l32i a15, a14, 0               // Load residual
+    l32i a15, a14, 0               // Load residual (a14 == &buffer[i + order])
     src a13, a12, a11              // result = (high:low) >> shift
-    add a15, a15, a13              // Add prediction
-    s32i a15, a14, 0               // Store result
-
     addi a10, a10, 4               // Advance buffer pointer
     addi a7, a7, -1                // Decrement outer loop counter
+    add a15, a15, a13              // Add prediction
+    s32i a15, a14, 0               // Store result
     bnez a7, .L64_outer_generic
     j .L64_done
 

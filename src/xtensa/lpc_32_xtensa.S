@@ -28,15 +28,24 @@
  * - Register-cached coefficients for orders 1-10
  * - Hybrid register-cached + memory-loaded coefficients for orders 11-12:
  *   coef[0]-coef[7] cached in a8-a15, coef[8]+ loaded from original pointer (a7)
- * - Software-pipelined MAC chain (orders 3-9): three-deep interleave using load(N+2),
- *   mull(N+1), add(N) ordering with rotating temps (a4/a5/a6) to hide both load-use
- *   and multiply-use latencies
- * - Generic fallback for orders > 12
+ * - Software-pipelined MAC chain (orders 3-9, 11-12): load(N+2), mull(N+1), add(N) with
+ *   rotating temps (a4/a5/a6)
+ * - Generic fallback for orders > 12, with each product added one iteration later
+ *
+ * Scheduling (measured with CCOUNT on both cores):
+ * - mull/mulsh results: one-cycle stall if the next instruction uses them, on LX6 and LX7
+ * - l32i/l16si results: one-cycle stall at distance 1 on LX7 (ESP32-S3); on LX6 (ESP32) two
+ *   cycles at distance 1 and one at distance 2
+ * - loads are issued at least 3 instructions before their first use and products at least 2
+ *   before theirs, except in order 10, whose two temps leave four one-cycle load stalls per
+ *   sample on LX6 (none on LX7); everything else runs stall-free on both cores
+ * - each sample's first product is written straight into the accumulator (no clearing), and
+ *   the next sample's first input is loaded at the end of the current iteration
  *
  * Unified register convention:
  * - a2: buffer pointer (all orders)
  * - a3: accumulator (also holds outer loop count until consumed by loop instruction)
- * - a4, a5, a6: rotating temp triple for pipelined load/multiply/accumulate (orders 3-9)
+ * - a4, a5, a6: rotating temp triple for pipelined load/multiply/accumulate (orders 3-9, 11-12)
  * - a4, a5: alternating temp pair (orders 1-2, 10)
  * - Coefficient registers (sequential, orders 1-9):
  *     a7=coef[0], a8=coef[1], a9=coef[2], a10=coef[3], a11=coef[4],
@@ -109,21 +118,21 @@ restore_lpc_32bit_asm:
     .word .Lorder_12
 
 // ============================================================================
-// Order 1: Single coefficient
+// Order 1: Single coefficient (previous output carried in a4)
 // ============================================================================
 .align 4
 .Lorder_1:
-    l16si a7, a4, 0                  // coef[0]
+    l16si a7, a4, 0                // coef[0]
+    l32i a4, a2, 0                 // buffer[0]; afterwards a4 holds the previous output
 
     loop a3, .Lloop_1_end
 .Lloop_1:
-    l32i a4, a2, 0                  // buffer[i]
-    l32i a5, a2, 4                  // Load residual (also fills load-use latency on a4)
-    mull a4, a4, a7                 // sum = buffer[i] * coef[0]
-    sra a4, a4                      // sum >>= shift
-    add a5, a5, a4                  // Add prediction to residual
-    s32i a5, a2, 4                  // Store result back
-    addi a2, a2, 4                  // Advance buffer pointer
+    mull a4, a4, a7                // buffer[i] * coef[0]
+    l32i a5, a2, 4                 // Load residual
+    addi a2, a2, 4                 // Advance buffer pointer (fills multiply-use latency)
+    sra a4, a4                     // sum >>= shift
+    add a4, a5, a4                 // Add prediction to residual
+    s32i a4, a2, 0                 // Store result (next iteration multiplies it)
 .Lloop_1_end:
     j .Ldone
 
@@ -132,20 +141,21 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_2:
-    l16si a7, a4, 0                  // coef[0]
-    l16si a8, a4, 2                  // coef[1]
+    l16si a7, a4, 0                // coef[0]
+    l16si a8, a4, 2                // coef[1]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_2_end
 .Lloop_2:
-    l32i a4, a2, 0                  // buffer[i]
-    l32i a5, a2, 4                  // buffer[i+1] (also fills load-use latency on a4)
-    mull a4, a4, a7                 // buffer[i] * coef[0]
-    mull a5, a5, a8                 // buffer[i+1] * coef[1]
-    l32i a6, a2, 8                  // Load residual (fills multiply-use latency on a5)
-    add a3, a4, a5                  // sum
-    sra a3, a3                      // sum >>= shift
-    add a6, a6, a3                  // Add prediction
-    s32i a6, a2, 8                  // Store back
+    l32i a5, a2, 4                 // buffer[i+1]
+    l32i a6, a2, 8                 // Load residual
+    mull a3, a4, a7                // sum = buffer[i] * coef[0]
+    mull a5, a5, a8                // buffer[i+1] * coef[1]
+    l32i a4, a2, 4                 // Next sample's buffer[0] (fills multiply-use latency)
+    add a3, a3, a5                 // sum
+    sra a3, a3                     // sum >>= shift
+    add a6, a6, a3                 // Add prediction
+    s32i a6, a2, 8                 // Store back
     addi a2, a2, 4
 .Lloop_2_end:
     j .Ldone
@@ -155,34 +165,30 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_3:
-    l16si a7, a4, 0                  // coef[0]
-    l16si a8, a4, 2                  // coef[1]
-    l16si a9, a4, 4                  // coef[2]
+    l16si a7, a4, 0                // coef[0]
+    l16si a8, a4, 2                // coef[1]
+    l16si a9, a4, 4                // coef[2]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_3_end
 .Lloop_3:
-    movi a3, 0                      // sum = 0
+    // Prologue: MAC 0 multiplies straight into the accumulator
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a7                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a8                // mull MAC 1
 
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a7                 // mull MAC 0
-
-    // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a8                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
-
-    // Epilogue: drain last 2 results
-    mull a6, a6, a9                 // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
-    add a3, a3, a6                  // add MAC 2
+    // Epilogue: drain last 2 results, residual loaded 3 ahead of its use
+    mull a6, a6, a9                // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
+    l32i a5, a2, 12                // Load residual
+    add a3, a3, a6                 // add MAC 2
 
     // Shift and store result
-    l32i a4, a2, 12                 // Load residual
     sra a3, a3
-    add a4, a4, a3
-    s32i a4, a2, 12
+    add a5, a5, a3
+    s32i a5, a2, 12
+    l32i a4, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .Lloop_3_end:
     j .Ldone
@@ -192,39 +198,36 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_4:
-    l16si a7, a4, 0                  // coef[0]
-    l16si a8, a4, 2                  // coef[1]
-    l16si a9, a4, 4                  // coef[2]
-    l16si a10, a4, 6                // coef[3]
+    l16si a7, a4, 0                // coef[0]
+    l16si a8, a4, 2                // coef[1]
+    l16si a9, a4, 4                // coef[2]
+    l16si a10, a4, 6               // coef[3]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_4_end
 .Lloop_4:
-    movi a3, 0                      // sum = 0
-
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a7                 // mull MAC 0
+    // Prologue: MAC 0 multiplies straight into the accumulator
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a7                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a8                // mull MAC 1
 
     // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a8                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
+    l32i a4, a2, 12                // load MAC 3
+    mull a6, a6, a9                // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
 
-    l32i a4, a2, 12                 // load MAC 3
-    mull a6, a6, a9                 // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
-
-    // Epilogue: drain last 2 results
-    mull a4, a4, a10                // mull MAC 3
-    add a3, a3, a6                  // add MAC 2
-    add a3, a3, a4                  // add MAC 3
+    // Epilogue: drain last 2 results, residual loaded 3 ahead of its use
+    mull a4, a4, a10               // mull MAC 3
+    add a3, a3, a6                 // add MAC 2
+    l32i a6, a2, 16                // Load residual
+    add a3, a3, a4                 // add MAC 3
 
     // Shift and store result
-    l32i a4, a2, 16                 // Load residual
     sra a3, a3
-    add a4, a4, a3
-    s32i a4, a2, 16
+    add a6, a6, a3
+    s32i a6, a2, 16
+    l32i a4, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .Lloop_4_end:
     j .Ldone
@@ -234,44 +237,41 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_5:
-    l16si a7, a4, 0                  // coef[0]
-    l16si a8, a4, 2                  // coef[1]
-    l16si a9, a4, 4                  // coef[2]
-    l16si a10, a4, 6                // coef[3]
-    l16si a11, a4, 8                // coef[4]
+    l16si a7, a4, 0                // coef[0]
+    l16si a8, a4, 2                // coef[1]
+    l16si a9, a4, 4                // coef[2]
+    l16si a10, a4, 6               // coef[3]
+    l16si a11, a4, 8               // coef[4]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_5_end
 .Lloop_5:
-    movi a3, 0                      // sum = 0
-
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a7                 // mull MAC 0
+    // Prologue: MAC 0 multiplies straight into the accumulator
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a7                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a8                // mull MAC 1
 
     // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a8                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
+    l32i a4, a2, 12                // load MAC 3
+    mull a6, a6, a9                // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
 
-    l32i a4, a2, 12                 // load MAC 3
-    mull a6, a6, a9                 // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
+    l32i a5, a2, 16                // load MAC 4
+    mull a4, a4, a10               // mull MAC 3
+    add a3, a3, a6                 // add MAC 2
 
-    l32i a5, a2, 16                 // load MAC 4
-    mull a4, a4, a10                // mull MAC 3
-    add a3, a3, a6                  // add MAC 2
-
-    // Epilogue: drain last 2 results
-    mull a5, a5, a11                // mull MAC 4
-    add a3, a3, a4                  // add MAC 3
-    add a3, a3, a5                  // add MAC 4
+    // Epilogue: drain last 2 results, residual loaded 3 ahead of its use
+    mull a5, a5, a11               // mull MAC 4
+    add a3, a3, a4                 // add MAC 3
+    l32i a4, a2, 20                // Load residual
+    add a3, a3, a5                 // add MAC 4
 
     // Shift and store result
-    l32i a4, a2, 20                 // Load residual
     sra a3, a3
     add a4, a4, a3
     s32i a4, a2, 20
+    l32i a4, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .Lloop_5_end:
     j .Ldone
@@ -281,49 +281,46 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_6:
-    l16si a7, a4, 0                  // coef[0]
-    l16si a8, a4, 2                  // coef[1]
-    l16si a9, a4, 4                  // coef[2]
-    l16si a10, a4, 6                // coef[3]
-    l16si a11, a4, 8                // coef[4]
-    l16si a12, a4, 10                // coef[5]
+    l16si a7, a4, 0                // coef[0]
+    l16si a8, a4, 2                // coef[1]
+    l16si a9, a4, 4                // coef[2]
+    l16si a10, a4, 6               // coef[3]
+    l16si a11, a4, 8               // coef[4]
+    l16si a12, a4, 10              // coef[5]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_6_end
 .Lloop_6:
-    movi a3, 0                      // sum = 0
-
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a7                 // mull MAC 0
+    // Prologue: MAC 0 multiplies straight into the accumulator
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a7                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a8                // mull MAC 1
 
     // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a8                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
+    l32i a4, a2, 12                // load MAC 3
+    mull a6, a6, a9                // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
 
-    l32i a4, a2, 12                 // load MAC 3
-    mull a6, a6, a9                 // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
+    l32i a5, a2, 16                // load MAC 4
+    mull a4, a4, a10               // mull MAC 3
+    add a3, a3, a6                 // add MAC 2
 
-    l32i a5, a2, 16                 // load MAC 4
-    mull a4, a4, a10                // mull MAC 3
-    add a3, a3, a6                  // add MAC 2
+    l32i a6, a2, 20                // load MAC 5
+    mull a5, a5, a11               // mull MAC 4
+    add a3, a3, a4                 // add MAC 3
 
-    l32i a6, a2, 20                 // load MAC 5
-    mull a5, a5, a11                // mull MAC 4
-    add a3, a3, a4                  // add MAC 3
-
-    // Epilogue: drain last 2 results
-    mull a6, a6, a12                // mull MAC 5
-    add a3, a3, a5                  // add MAC 4
-    add a3, a3, a6                  // add MAC 5
+    // Epilogue: drain last 2 results, residual loaded 3 ahead of its use
+    mull a6, a6, a12               // mull MAC 5
+    add a3, a3, a5                 // add MAC 4
+    l32i a5, a2, 24                // Load residual
+    add a3, a3, a6                 // add MAC 5
 
     // Shift and store result
-    l32i a4, a2, 24                 // Load residual
     sra a3, a3
-    add a4, a4, a3
-    s32i a4, a2, 24
+    add a5, a5, a3
+    s32i a5, a2, 24
+    l32i a4, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .Lloop_6_end:
     j .Ldone
@@ -333,54 +330,51 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_7:
-    l16si a7, a4, 0                  // coef[0]
-    l16si a8, a4, 2                  // coef[1]
-    l16si a9, a4, 4                  // coef[2]
-    l16si a10, a4, 6                // coef[3]
-    l16si a11, a4, 8                // coef[4]
-    l16si a12, a4, 10                // coef[5]
-    l16si a13, a4, 12                // coef[6]
+    l16si a7, a4, 0                // coef[0]
+    l16si a8, a4, 2                // coef[1]
+    l16si a9, a4, 4                // coef[2]
+    l16si a10, a4, 6               // coef[3]
+    l16si a11, a4, 8               // coef[4]
+    l16si a12, a4, 10              // coef[5]
+    l16si a13, a4, 12              // coef[6]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_7_end
 .Lloop_7:
-    movi a3, 0                      // sum = 0
-
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a7                 // mull MAC 0
+    // Prologue: MAC 0 multiplies straight into the accumulator
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a7                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a8                // mull MAC 1
 
     // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a8                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
+    l32i a4, a2, 12                // load MAC 3
+    mull a6, a6, a9                // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
 
-    l32i a4, a2, 12                 // load MAC 3
-    mull a6, a6, a9                 // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
+    l32i a5, a2, 16                // load MAC 4
+    mull a4, a4, a10               // mull MAC 3
+    add a3, a3, a6                 // add MAC 2
 
-    l32i a5, a2, 16                 // load MAC 4
-    mull a4, a4, a10                // mull MAC 3
-    add a3, a3, a6                  // add MAC 2
+    l32i a6, a2, 20                // load MAC 5
+    mull a5, a5, a11               // mull MAC 4
+    add a3, a3, a4                 // add MAC 3
 
-    l32i a6, a2, 20                 // load MAC 5
-    mull a5, a5, a11                // mull MAC 4
-    add a3, a3, a4                  // add MAC 3
+    l32i a4, a2, 24                // load MAC 6
+    mull a6, a6, a12               // mull MAC 5
+    add a3, a3, a5                 // add MAC 4
 
-    l32i a4, a2, 24                 // load MAC 6
-    mull a6, a6, a12                // mull MAC 5
-    add a3, a3, a5                  // add MAC 4
-
-    // Epilogue: drain last 2 results
-    mull a4, a4, a13                // mull MAC 6
-    add a3, a3, a6                  // add MAC 5
-    add a3, a3, a4                  // add MAC 6
+    // Epilogue: drain last 2 results, residual loaded 3 ahead of its use
+    mull a4, a4, a13               // mull MAC 6
+    add a3, a3, a6                 // add MAC 5
+    l32i a6, a2, 28                // Load residual
+    add a3, a3, a4                 // add MAC 6
 
     // Shift and store result
-    l32i a4, a2, 28                 // Load residual
     sra a3, a3
-    add a4, a4, a3
-    s32i a4, a2, 28
+    add a6, a6, a3
+    s32i a6, a2, 28
+    l32i a4, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .Lloop_7_end:
     j .Ldone
@@ -390,59 +384,56 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_8:
-    l16si a7, a4, 0                  // coef[0]
-    l16si a8, a4, 2                  // coef[1]
-    l16si a9, a4, 4                  // coef[2]
-    l16si a10, a4, 6                // coef[3]
-    l16si a11, a4, 8                // coef[4]
-    l16si a12, a4, 10                // coef[5]
-    l16si a13, a4, 12                // coef[6]
-    l16si a14, a4, 14                // coef[7]
+    l16si a7, a4, 0                // coef[0]
+    l16si a8, a4, 2                // coef[1]
+    l16si a9, a4, 4                // coef[2]
+    l16si a10, a4, 6               // coef[3]
+    l16si a11, a4, 8               // coef[4]
+    l16si a12, a4, 10              // coef[5]
+    l16si a13, a4, 12              // coef[6]
+    l16si a14, a4, 14              // coef[7]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_8_end
 .Lloop_8:
-    movi a3, 0                      // sum = 0
-
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a7                 // mull MAC 0
+    // Prologue: MAC 0 multiplies straight into the accumulator
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a7                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a8                // mull MAC 1
 
     // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a8                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
+    l32i a4, a2, 12                // load MAC 3
+    mull a6, a6, a9                // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
 
-    l32i a4, a2, 12                 // load MAC 3
-    mull a6, a6, a9                 // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
+    l32i a5, a2, 16                // load MAC 4
+    mull a4, a4, a10               // mull MAC 3
+    add a3, a3, a6                 // add MAC 2
 
-    l32i a5, a2, 16                 // load MAC 4
-    mull a4, a4, a10                // mull MAC 3
-    add a3, a3, a6                  // add MAC 2
+    l32i a6, a2, 20                // load MAC 5
+    mull a5, a5, a11               // mull MAC 4
+    add a3, a3, a4                 // add MAC 3
 
-    l32i a6, a2, 20                 // load MAC 5
-    mull a5, a5, a11                // mull MAC 4
-    add a3, a3, a4                  // add MAC 3
+    l32i a4, a2, 24                // load MAC 6
+    mull a6, a6, a12               // mull MAC 5
+    add a3, a3, a5                 // add MAC 4
 
-    l32i a4, a2, 24                 // load MAC 6
-    mull a6, a6, a12                // mull MAC 5
-    add a3, a3, a5                  // add MAC 4
+    l32i a5, a2, 28                // load MAC 7
+    mull a4, a4, a13               // mull MAC 6
+    add a3, a3, a6                 // add MAC 5
 
-    l32i a5, a2, 28                 // load MAC 7
-    mull a4, a4, a13                // mull MAC 6
-    add a3, a3, a6                  // add MAC 5
-
-    // Epilogue: drain last 2 results
-    mull a5, a5, a14                // mull MAC 7
-    add a3, a3, a4                  // add MAC 6
-    add a3, a3, a5                  // add MAC 7
+    // Epilogue: drain last 2 results, residual loaded 3 ahead of its use
+    mull a5, a5, a14               // mull MAC 7
+    add a3, a3, a4                 // add MAC 6
+    l32i a4, a2, 32                // Load residual
+    add a3, a3, a5                 // add MAC 7
 
     // Shift and store result
-    l32i a4, a2, 32                 // Load residual
     sra a3, a3
     add a4, a4, a3
     s32i a4, a2, 32
+    l32i a4, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .Lloop_8_end:
     j .Ldone
@@ -452,134 +443,125 @@ restore_lpc_32bit_asm:
 // ============================================================================
 .align 4
 .Lorder_9:
-    l16si a7, a4, 0                  // coef[0]
-    l16si a8, a4, 2                  // coef[1]
-    l16si a9, a4, 4                  // coef[2]
-    l16si a10, a4, 6                // coef[3]
-    l16si a11, a4, 8                // coef[4]
-    l16si a12, a4, 10                // coef[5]
-    l16si a13, a4, 12                // coef[6]
-    l16si a14, a4, 14                // coef[7]
-    l16si a15, a4, 16                // coef[8]
+    l16si a7, a4, 0                // coef[0]
+    l16si a8, a4, 2                // coef[1]
+    l16si a9, a4, 4                // coef[2]
+    l16si a10, a4, 6               // coef[3]
+    l16si a11, a4, 8               // coef[4]
+    l16si a12, a4, 10              // coef[5]
+    l16si a13, a4, 12              // coef[6]
+    l16si a14, a4, 14              // coef[7]
+    l16si a15, a4, 16              // coef[8]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_9_end
 .Lloop_9:
-    movi a3, 0                      // sum = 0
-
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a7                 // mull MAC 0
+    // Prologue: MAC 0 multiplies straight into the accumulator
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a7                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a8                // mull MAC 1
 
     // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a8                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
+    l32i a4, a2, 12                // load MAC 3
+    mull a6, a6, a9                // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
 
-    l32i a4, a2, 12                 // load MAC 3
-    mull a6, a6, a9                 // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
+    l32i a5, a2, 16                // load MAC 4
+    mull a4, a4, a10               // mull MAC 3
+    add a3, a3, a6                 // add MAC 2
 
-    l32i a5, a2, 16                 // load MAC 4
-    mull a4, a4, a10                // mull MAC 3
-    add a3, a3, a6                  // add MAC 2
+    l32i a6, a2, 20                // load MAC 5
+    mull a5, a5, a11               // mull MAC 4
+    add a3, a3, a4                 // add MAC 3
 
-    l32i a6, a2, 20                 // load MAC 5
-    mull a5, a5, a11                // mull MAC 4
-    add a3, a3, a4                  // add MAC 3
+    l32i a4, a2, 24                // load MAC 6
+    mull a6, a6, a12               // mull MAC 5
+    add a3, a3, a5                 // add MAC 4
 
-    l32i a4, a2, 24                 // load MAC 6
-    mull a6, a6, a12                // mull MAC 5
-    add a3, a3, a5                  // add MAC 4
+    l32i a5, a2, 28                // load MAC 7
+    mull a4, a4, a13               // mull MAC 6
+    add a3, a3, a6                 // add MAC 5
 
-    l32i a5, a2, 28                 // load MAC 7
-    mull a4, a4, a13                // mull MAC 6
-    add a3, a3, a6                  // add MAC 5
+    l32i a6, a2, 32                // load MAC 8
+    mull a5, a5, a14               // mull MAC 7
+    add a3, a3, a4                 // add MAC 6
 
-    l32i a6, a2, 32                 // load MAC 8
-    mull a5, a5, a14                // mull MAC 7
-    add a3, a3, a4                  // add MAC 6
-
-    // Epilogue: drain last 2 results
-    mull a6, a6, a15                // mull MAC 8
-    add a3, a3, a5                  // add MAC 7
-    add a3, a3, a6                  // add MAC 8
+    // Epilogue: drain last 2 results, residual loaded 3 ahead of its use
+    mull a6, a6, a15               // mull MAC 8
+    add a3, a3, a5                 // add MAC 7
+    l32i a5, a2, 36                // Load residual
+    add a3, a3, a6                 // add MAC 8
 
     // Shift and store result
-    l32i a4, a2, 36                 // Load residual
     sra a3, a3
-    add a4, a4, a3
-    s32i a4, a2, 36
+    add a5, a5, a3
+    s32i a5, a2, 36
+    l32i a4, a2, 4                 // Next sample's buffer[0]
     addi a2, a2, 4
 .Lloop_9_end:
     j .Ldone
 
 // ============================================================================
-// Order 10: Ten coefficients (register-cached)
+// Order 10: Ten coefficients (register-cached, two temps)
 // ============================================================================
 .align 4
 .Lorder_10:
-    l16si a6, a4, 0                  // coef[0]
-    l16si a7, a4, 2                  // coef[1]
-    l16si a8, a4, 4                  // coef[2]
-    l16si a9, a4, 6                 // coef[3]
-    l16si a10, a4, 8                // coef[4]
-    l16si a11, a4, 10                // coef[5]
-    l16si a12, a4, 12                // coef[6]
-    l16si a13, a4, 14                // coef[7]
-    l16si a14, a4, 16                // coef[8]
-    l16si a15, a4, 18                // coef[9]
+    l16si a6, a4, 0                // coef[0]
+    l16si a7, a4, 2                // coef[1]
+    l16si a8, a4, 4                // coef[2]
+    l16si a9, a4, 6                // coef[3]
+    l16si a10, a4, 8               // coef[4]
+    l16si a11, a4, 10              // coef[5]
+    l16si a12, a4, 12              // coef[6]
+    l16si a13, a4, 14              // coef[7]
+    l16si a14, a4, 16              // coef[8]
+    l16si a15, a4, 18              // coef[9]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
+    l32i a5, a2, 4                 // buffer[1] of the first sample
 
     loop a3, .Lloop_10_end
 .Lloop_10:
-    movi a3, 0                      // sum = 0
+    // Pairs: mull(N), mull(N+1), add(N), load(N+2), add(N+1), load(N+3)
+    mull a3, a4, a6                // sum = MAC 0 (a4/a5 loaded by the previous iteration)
+    mull a5, a5, a7                // mull MAC 1
+    l32i a4, a2, 8                 // load MAC 2
+    add a3, a3, a5                 // add MAC 1
+    l32i a5, a2, 12                // load MAC 3
 
-    l32i a4, a2, 0                  // buffer[0]
-    l32i a5, a2, 4                  // Pre-load buffer[1]
-    mull a4, a4, a6                 // buffer[0] * coef[0]
-    add a3, a3, a4                  // Accumulate
+    mull a4, a4, a8                // mull MAC 2
+    mull a5, a5, a9                // mull MAC 3
+    add a3, a3, a4                 // add MAC 2
+    l32i a4, a2, 16                // load MAC 4
+    add a3, a3, a5                 // add MAC 3
+    l32i a5, a2, 20                // load MAC 5
 
-    l32i a4, a2, 8                  // Pre-load buffer[2]
-    mull a5, a5, a7                 // buffer[1] * coef[1]
-    add a3, a3, a5                  // Accumulate
+    mull a4, a4, a10               // mull MAC 4
+    mull a5, a5, a11               // mull MAC 5
+    add a3, a3, a4                 // add MAC 4
+    l32i a4, a2, 24                // load MAC 6
+    add a3, a3, a5                 // add MAC 5
+    l32i a5, a2, 28                // load MAC 7
 
-    l32i a5, a2, 12                 // Pre-load buffer[3]
-    mull a4, a4, a8                 // buffer[2] * coef[2]
-    add a3, a3, a4                  // Accumulate
+    mull a4, a4, a12               // mull MAC 6
+    mull a5, a5, a13               // mull MAC 7
+    add a3, a3, a4                 // add MAC 6
+    l32i a4, a2, 32                // load MAC 8
+    add a3, a3, a5                 // add MAC 7
+    l32i a5, a2, 36                // load MAC 9
 
-    l32i a4, a2, 16                 // Pre-load buffer[4]
-    mull a5, a5, a9                 // buffer[3] * coef[3]
-    add a3, a3, a5                  // Accumulate
-
-    l32i a5, a2, 20                 // Pre-load buffer[5]
-    mull a4, a4, a10                // buffer[4] * coef[4]
-    add a3, a3, a4                  // Accumulate
-
-    l32i a4, a2, 24                 // Pre-load buffer[6]
-    mull a5, a5, a11                // buffer[5] * coef[5]
-    add a3, a3, a5                  // Accumulate
-
-    l32i a5, a2, 28                 // Pre-load buffer[7]
-    mull a4, a4, a12                // buffer[6] * coef[6]
-    add a3, a3, a4                  // Accumulate
-
-    l32i a4, a2, 32                 // Pre-load buffer[8]
-    mull a5, a5, a13                // buffer[7] * coef[7]
-    add a3, a3, a5                  // Accumulate
-
-    l32i a5, a2, 36                 // Pre-load buffer[9]
-    mull a4, a4, a14                // buffer[8] * coef[8]
-    add a3, a3, a4                  // Accumulate
-
-    // MAC 10: last - no pre-load
-    mull a5, a5, a15                // buffer[9] * coef[9]
-    add a3, a3, a5                  // Accumulate
+    mull a4, a4, a14               // mull MAC 8
+    mull a5, a5, a15               // mull MAC 9
+    add a3, a3, a4                 // add MAC 8
+    l32i a4, a2, 40                // Load residual
+    add a3, a3, a5                 // add MAC 9
 
     // Shift and store result
-    l32i a4, a2, 40                 // Load residual at offset 40 (10*4)
     sra a3, a3
     add a4, a4, a3
     s32i a4, a2, 40
+    l32i a4, a2, 4                 // Next sample's buffer[0]
+    l32i a5, a2, 8                 // Next sample's buffer[1]
     addi a2, a2, 4
 .Lloop_10_end:
     j .Ldone
@@ -590,80 +572,74 @@ restore_lpc_32bit_asm:
 .align 4
 .Lorder_11:
     // Cache coef[0]-coef[7] in registers, keep pointer for coef[8]-coef[10]
-    mov a7, a4                      // Save coef pointer for tail section
-    l16si a8, a4, 0                  // coef[0]
-    l16si a9, a4, 2                  // coef[1]
-    l16si a10, a4, 4                 // coef[2]
-    l16si a11, a4, 6                // coef[3]
-    l16si a12, a4, 8                // coef[4]
-    l16si a13, a4, 10                // coef[5]
-    l16si a14, a4, 12                // coef[6]
-    l16si a15, a4, 14                // coef[7]
+    mov a7, a4                     // Save coef pointer for tail section
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l16si a10, a4, 4               // coef[2]
+    l16si a11, a4, 6               // coef[3]
+    l16si a12, a4, 8               // coef[4]
+    l16si a13, a4, 10              // coef[5]
+    l16si a14, a4, 12              // coef[6]
+    l16si a15, a4, 14              // coef[7]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_11_end
 .Lloop_11:
-    movi a3, 0                      // sum = 0
-
     // === Pipelined section: MACs 0-7 (register-cached coefficients) ===
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a8                 // mull MAC 0
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a8                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a9                // mull MAC 1
 
     // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a9                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
+    l32i a4, a2, 12                // load MAC 3
+    mull a6, a6, a10               // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
 
-    l32i a4, a2, 12                 // load MAC 3
-    mull a6, a6, a10                // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
+    l32i a5, a2, 16                // load MAC 4
+    mull a4, a4, a11               // mull MAC 3
+    add a3, a3, a6                 // add MAC 2
 
-    l32i a5, a2, 16                 // load MAC 4
-    mull a4, a4, a11                // mull MAC 3
-    add a3, a3, a6                  // add MAC 2
+    l32i a6, a2, 20                // load MAC 5
+    mull a5, a5, a12               // mull MAC 4
+    add a3, a3, a4                 // add MAC 3
 
-    l32i a6, a2, 20                 // load MAC 5
-    mull a5, a5, a12                // mull MAC 4
-    add a3, a3, a4                  // add MAC 3
+    l32i a4, a2, 24                // load MAC 6
+    mull a6, a6, a13               // mull MAC 5
+    add a3, a3, a5                 // add MAC 4
 
-    l32i a4, a2, 24                 // load MAC 6
-    mull a6, a6, a13                // mull MAC 5
-    add a3, a3, a5                  // add MAC 4
+    l32i a5, a2, 28                // load MAC 7
+    mull a4, a4, a14               // mull MAC 6
+    add a3, a3, a6                 // add MAC 5
 
-    l32i a5, a2, 28                 // load MAC 7
-    mull a4, a4, a14                // mull MAC 6
-    add a3, a3, a6                  // add MAC 5
-
-    // Epilogue: drain last 2 results
-    mull a5, a5, a15                // mull MAC 7
-    add a3, a3, a4                  // add MAC 6
-    add a3, a3, a5                  // add MAC 7
+    // Drain MACs 6-7 while loading coef[8] and buffer[8]
+    l16si a6, a7, 16               // coef[8]
+    mull a5, a5, a15               // mull MAC 7
+    add a3, a3, a4                 // add MAC 6
+    l32i a4, a2, 32                // buffer[8]
+    add a3, a3, a5                 // add MAC 7
 
     // === Tail section: MACs 8-10 (memory-loaded coefficients from a7) ===
-    l32i a4, a2, 32                 // buffer[8]
-    l16si a6, a7, 16                 // coef[8]
-
-    l32i a5, a2, 36                 // Pre-load buffer[9]
+    l32i a5, a2, 36                // Pre-load buffer[9]
     mull a4, a4, a6
-    l16si a6, a7, 18                 // Pre-load coef[9]
-    add a3, a3, a4                  // Accumulate MAC 8
+    l16si a6, a7, 18               // Pre-load coef[9]
+    add a3, a3, a4                 // Accumulate MAC 8
 
-    l32i a4, a2, 40                 // Pre-load buffer[10]
+    l32i a4, a2, 40                // Pre-load buffer[10]
     mull a5, a5, a6
-    l16si a6, a7, 20                 // Pre-load coef[10]
-    add a3, a3, a5                  // Accumulate MAC 9
+    l16si a6, a7, 20               // Pre-load coef[10]
+    add a3, a3, a5                 // Accumulate MAC 9
 
-    // MAC 10: last - no pre-load
-    mull a4, a4, a6
-    add a3, a3, a4                  // Accumulate MAC 10
+    l32i a5, a2, 44                // Load residual
+    mull a4, a4, a6                // MAC 10: last
+    addi a2, a2, 4                 // Advance buffer pointer (fills multiply-use latency)
+    add a3, a3, a4                 // Accumulate MAC 10
 
-    // Shift and store result
-    l32i a4, a2, 44                 // Load residual at offset 44 (11*4)
+    // Shift and store result (a2 already advanced)
     sra a3, a3
-    add a4, a4, a3
-    s32i a4, a2, 44
-    addi a2, a2, 4
+    add a5, a5, a3
+    s32i a5, a2, 40
+    l32i a4, a2, 0                 // Next sample's buffer[0]
 .Lloop_11_end:
     j .Ldone
 
@@ -673,85 +649,79 @@ restore_lpc_32bit_asm:
 .align 4
 .Lorder_12:
     // Cache coef[0]-coef[7] in registers, keep pointer for coef[8]-coef[11]
-    mov a7, a4                      // Save coef pointer for tail section
-    l16si a8, a4, 0                  // coef[0]
-    l16si a9, a4, 2                  // coef[1]
-    l16si a10, a4, 4                 // coef[2]
-    l16si a11, a4, 6                // coef[3]
-    l16si a12, a4, 8                // coef[4]
-    l16si a13, a4, 10                // coef[5]
-    l16si a14, a4, 12                // coef[6]
-    l16si a15, a4, 14                // coef[7]
+    mov a7, a4                     // Save coef pointer for tail section
+    l16si a8, a4, 0                // coef[0]
+    l16si a9, a4, 2                // coef[1]
+    l16si a10, a4, 4               // coef[2]
+    l16si a11, a4, 6               // coef[3]
+    l16si a12, a4, 8               // coef[4]
+    l16si a13, a4, 10              // coef[5]
+    l16si a14, a4, 12              // coef[6]
+    l16si a15, a4, 14              // coef[7]
+    l32i a4, a2, 0                 // buffer[0] of the first sample
 
     loop a3, .Lloop_12_end
 .Lloop_12:
-    movi a3, 0                      // sum = 0
-
     // === Pipelined section: MACs 0-7 (register-cached coefficients) ===
-    // Prologue: 2 loads + 1 mull to prime pipeline
-    l32i a4, a2, 0                  // load MAC 0
-    l32i a5, a2, 4                  // load MAC 1
-    mull a4, a4, a8                 // mull MAC 0
+    l32i a5, a2, 4                 // load MAC 1
+    l32i a6, a2, 8                 // load MAC 2
+    mull a3, a4, a8                // sum = MAC 0 (a4 loaded by the previous iteration)
+    mull a5, a5, a9                // mull MAC 1
 
     // Steady state: load(N+2), mull(N+1), add(N)
-    l32i a6, a2, 8                  // load MAC 2
-    mull a5, a5, a9                 // mull MAC 1
-    add a3, a3, a4                  // add MAC 0
+    l32i a4, a2, 12                // load MAC 3
+    mull a6, a6, a10               // mull MAC 2
+    add a3, a3, a5                 // add MAC 1
 
-    l32i a4, a2, 12                 // load MAC 3
-    mull a6, a6, a10                // mull MAC 2
-    add a3, a3, a5                  // add MAC 1
+    l32i a5, a2, 16                // load MAC 4
+    mull a4, a4, a11               // mull MAC 3
+    add a3, a3, a6                 // add MAC 2
 
-    l32i a5, a2, 16                 // load MAC 4
-    mull a4, a4, a11                // mull MAC 3
-    add a3, a3, a6                  // add MAC 2
+    l32i a6, a2, 20                // load MAC 5
+    mull a5, a5, a12               // mull MAC 4
+    add a3, a3, a4                 // add MAC 3
 
-    l32i a6, a2, 20                 // load MAC 5
-    mull a5, a5, a12                // mull MAC 4
-    add a3, a3, a4                  // add MAC 3
+    l32i a4, a2, 24                // load MAC 6
+    mull a6, a6, a13               // mull MAC 5
+    add a3, a3, a5                 // add MAC 4
 
-    l32i a4, a2, 24                 // load MAC 6
-    mull a6, a6, a13                // mull MAC 5
-    add a3, a3, a5                  // add MAC 4
+    l32i a5, a2, 28                // load MAC 7
+    mull a4, a4, a14               // mull MAC 6
+    add a3, a3, a6                 // add MAC 5
 
-    l32i a5, a2, 28                 // load MAC 7
-    mull a4, a4, a14                // mull MAC 6
-    add a3, a3, a6                  // add MAC 5
-
-    // Epilogue: drain last 2 results
-    mull a5, a5, a15                // mull MAC 7
-    add a3, a3, a4                  // add MAC 6
-    add a3, a3, a5                  // add MAC 7
+    // Drain MACs 6-7 while loading coef[8] and buffer[8]
+    l16si a6, a7, 16               // coef[8]
+    mull a5, a5, a15               // mull MAC 7
+    add a3, a3, a4                 // add MAC 6
+    l32i a4, a2, 32                // buffer[8]
+    add a3, a3, a5                 // add MAC 7
 
     // === Tail section: MACs 8-11 (memory-loaded coefficients from a7) ===
-    l32i a4, a2, 32                 // buffer[8]
-    l16si a6, a7, 16                 // coef[8]
-
-    l32i a5, a2, 36                 // Pre-load buffer[9]
+    l32i a5, a2, 36                // Pre-load buffer[9]
     mull a4, a4, a6
-    l16si a6, a7, 18                 // Pre-load coef[9]
-    add a3, a3, a4                  // Accumulate MAC 8
+    l16si a6, a7, 18               // Pre-load coef[9]
+    add a3, a3, a4                 // Accumulate MAC 8
 
-    l32i a4, a2, 40                 // Pre-load buffer[10]
+    l32i a4, a2, 40                // Pre-load buffer[10]
     mull a5, a5, a6
-    l16si a6, a7, 20                 // Pre-load coef[10]
-    add a3, a3, a5                  // Accumulate MAC 9
+    l16si a6, a7, 20               // Pre-load coef[10]
+    add a3, a3, a5                 // Accumulate MAC 9
 
-    l32i a5, a2, 44                 // Pre-load buffer[11]
+    l32i a5, a2, 44                // Pre-load buffer[11]
     mull a4, a4, a6
-    l16si a6, a7, 22                 // Pre-load coef[11]
-    add a3, a3, a4                  // Accumulate MAC 10
+    l16si a6, a7, 22               // Pre-load coef[11]
+    add a3, a3, a4                 // Accumulate MAC 10
 
-    // MAC 11: last - no pre-load
-    mull a5, a5, a6
-    add a3, a3, a5                  // Accumulate MAC 11
+    l32i a4, a2, 48                // Load residual
+    mull a5, a5, a6                // MAC 11: last
+    addi a2, a2, 4                 // Advance buffer pointer (fills multiply-use latency)
+    add a3, a3, a5                 // Accumulate MAC 11
 
-    // Shift and store result
-    l32i a4, a2, 48                 // Load residual at offset 48 (12*4)
+    // Shift and store result (a2 already advanced)
     sra a3, a3
     add a4, a4, a3
-    s32i a4, a2, 48
-    addi a2, a2, 4
+    s32i a4, a2, 44
+    l32i a4, a2, 0                 // Next sample's buffer[0]
 .Lloop_12_end:
     j .Ldone
 
@@ -762,40 +732,41 @@ restore_lpc_32bit_asm:
 .Lgeneric:
     // NOTE: Cannot use nested hardware loops on Xtensa (only one set of LCOUNT/LBEG/LEND
     // registers). Use branch-based outer loop with hardware loop for the inner loop only.
+    // Each product is added one iteration later, so no add waits on its mull.
     // Register allocation:
-    //   a2 = buffer pointer (advances each outer iteration)
-    //   a3 = outer loop counter (decremented each iteration)
-    //   a4 = coefficients pointer (constant)
-    //   a5 = order (constant)
-    //   a6 = sum accumulator
-    //   a7 = j counter
-    //   a8 = inner buffer position
-    //   a9, a10 = temps
+    //   a2  = buffer pointer (advances each outer iteration)
+    //   a3  = outer loop counter (decremented each iteration)
+    //   a4  = coefficients pointer (constant)
+    //   a5  = order (constant)
+    //   a6  = sum accumulator
+    //   a7  = coefficient pointer for the inner loop
+    //   a8  = buffer position for the inner loop
+    //   a9  = buffer value / residual
+    //   a10 = coefficient
+    //   a11 = previous product
 .Louter_generic:
     movi a6, 0                      // sum = 0
-    movi a7, 0                      // j = 0 (inner loop counter)
-    mov a8, a2                      // Current buffer position for inner loop
+    movi a11, 0                     // No product yet
+    mov a7, a4                      // &coef[0]
+    mov a8, a2                      // &buffer[i]
 
     loop a5, .Linner_generic_end
 .Linner_generic:
+    l16si a10, a7, 0                // coef[j]
+    add a6, a6, a11                 // sum += previous product
     l32i a9, a8, 0                  // buffer[i+j]
-    addx2 a10, a7, a4              // &coef[j]
-    l16si a10, a10, 0               // coef[j]
-    mull a9, a9, a10               // buffer[i+j] * coef[j]
-    add a6, a6, a9                  // sum += ...
-
-    addi a7, a7, 1                  // j++
-    addi a8, a8, 4                  // Advance buffer pointer for inner loop
+    addi a7, a7, 2                  // Advance coefficient pointer
+    addi a8, a8, 4                  // Advance buffer pointer
+    mull a11, a9, a10               // buffer[i+j] * coef[j]
 .Linner_generic_end:
 
-    addx4 a7, a5, a2               // &buffer[i + order]
-    l32i a8, a7, 0                  // Load residual
+    l32i a9, a8, 0                  // Load residual (a8 == &buffer[i + order])
+    add a6, a6, a11                 // sum += last product
     sra a6, a6                      // sum >>= shift
-    add a8, a8, a6                  // Add prediction
-    s32i a8, a7, 0                  // Store result
-
     addi a2, a2, 4                  // Advance buffer pointer
+    add a9, a9, a6                  // Add prediction
     addi a3, a3, -1                 // Decrement outer loop counter
+    s32i a9, a8, 0                  // Store result
     bnez a3, .Louter_generic
     j .Ldone
 
