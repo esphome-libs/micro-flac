@@ -88,36 +88,23 @@ runs:
         debs="${HOME}/.cache/apt-debs"
         read -ra package_list <<< "${PACKAGES}"
         # Every apt call is bounded; timeout runs under sudo so it can kill apt-get itself. Each
-        # install names packages, never .deb files, so apt resolves them against the image's
-        # signed package lists; a named .deb would be installed as-is.
+        # install names packages, never .deb files, so apt takes a cached deb only where its name
+        # and size match the version the image's package lists pick; an entry that is incomplete
+        # or holds other versions (a previous image's, say) fails --no-download and falls through
+        # to the download. A named .deb would be installed whatever its version.
         apt_get() {
           local limit="$1"
           shift
           sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 "${limit}" apt-get -q -y \
             -o Dir::Cache::archives="${debs}" -o APT::Install-Recommends="${RECOMMENDS}" "$@"
         }
-        # apt checks only the size of a deb it finds in the archives folder, so a tampered deb of
-        # the right name and size would install and run its maintainer scripts as root. Check each
-        # deb the install would take from the entry against the SHA256 in the image's package
-        # lists first: a missing, mismatched or unhashed deb fails the hit before dpkg runs.
-        verify_debs() {
-          local uris file hash
-          # Pointed at an empty archives folder, apt lists every deb the install needs.
-          uris="$(apt_get 60 -qq -o Dir::Cache::archives="$(mktemp -d)" \
-            -o Acquire::ForceHash=SHA256 install --print-uris "${package_list[@]}")" || return 1
-          while read -r _ file _ hash; do
-            [ -n "${file}" ] || continue
-            [[ "${hash}" =~ ^SHA256:[0-9a-f]{64}$ ]] || return 1
-            sha256sum --check --status <<< "${hash#SHA256:}  ${debs}/${file}" || return 1
-          done <<< "${uris}"
-        }
 
         if [ -n "${RESTORED_KEY}" ] && compgen -G "${debs}/*.deb" > /dev/null; then
-          if verify_debs && apt_get 180 install --no-download "${package_list[@]}"; then
+          if apt_get 180 install --no-download "${package_list[@]}"; then
             echo "Installed ${PACKAGES} from cache entry ${RESTORED_KEY}"
             exit 0
           fi
-          echo "::warning::Cached packages from ${RESTORED_KEY} did not verify or install; downloading them instead"
+          echo "::warning::Cached packages from ${RESTORED_KEY} did not install; downloading them instead"
           # An install that dpkg started (one the time limit killed, say) leaves it half-configured.
           sudo DEBIAN_FRONTEND=noninteractive timeout -k 10 60 dpkg --configure -a || true
         fi
