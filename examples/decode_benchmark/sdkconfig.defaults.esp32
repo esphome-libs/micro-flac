@@ -4,6 +4,13 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 # CPU Frequency
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
-# Octal PSRAM mode
+# Flash at 80 MHz in DIO mode. 80 MHz PSRAM is only selectable with 80 MHz flash
+# (at 40 MHz flash, CONFIG_SPIRAM_SPEED_80M silently falls back to 40 MHz).
+# DIO needs no extra flash wiring; QIO is about 6-7% faster on this benchmark but
+# needs the flash's WP/HD pins connected. See README.md for the caveats.
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# Quad PSRAM at 80 MHz. Some WROVER-B/E batches only run PSRAM at 40 MHz
+# ("PSRAM chip not found"); use CONFIG_SPIRAM_SPEED_40M=y on those boards.
 CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y
