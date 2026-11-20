@@ -108,12 +108,17 @@ runs:
             echo "Installed ${PACKAGES} from cache entry ${RESTORED_KEY}"
             exit 0
           fi
-          echo "::warning::Cached packages from ${RESTORED_KEY} did not install; downloading them instead"
+          echo "::warning::Cached packages from ${RESTORED_KEY} did not install; downloading from the mirror instead"
           # An install that dpkg started (one the time limit killed, say) leaves it half-configured.
           sudo DEBIAN_FRONTEND=noninteractive timeout -k 10 60 dpkg --configure -a || true
         fi
 
-        sudo rm -rf "${debs}"
+        # A job that doesn't save keeps what it restored: the download reuses every deb whose name
+        # and size still match (most of a previous image's entry, say) and fetches only the rest.
+        # A saving run starts clean, so its entry holds only debs it downloaded.
+        if [ "${SAVE}" = true ]; then
+          sudo rm -rf "${debs}"
+        fi
         mkdir -p "${debs}/partial"
         # The mirror calls share one budget: a slow mirror may need most of it for one download
         # (66 MB took over 4 minutes once), while the image's 15 s apt timeout catches a dead
