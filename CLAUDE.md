@@ -163,6 +163,7 @@ python3 test_flac_encoder.py --skip-lpc --skip-partitions  # Skip the LPC and Ri
 - **Error codes**: Negative return values are errors, positive are informational (SUCCESS=0, HEADER_READY=1, END_OF_STREAM=2, NEED_MORE_DATA=3)
 - **32-bit output mode**: Use the `int32_t*` overload of `decode()` for 32-bit left-justified output
 - **Xtensa assembly**: Only available on ESP32/ESP32-S3 (LX6/LX7), not RISC-V chips
+- **LPC assembly scheduling**: the ESP32 (LX6) has a longer load-use latency than the S3. Keep every load at least 3 instructions before its first use and every `mull`/`mulsh` result at least 2, or the ESP32 stalls even when the S3 doesn't (see `src/README.md`). The loops have no other correctness check on device, so replay real decoder LPC vectors (`MICRO_FLAC_DUMP_LPC_VECTORS`) through the assembly after changing it
 - **No seeking support**: Decoder is designed for streaming, not random access
 - **Encoder output buffer**: `encoder.get_max_output_bytes()` is constant until `reset(format, options)` reconfigures the encoder and fits the header and every frame; the check happens up front and the call fails cleanly with `FLAC_ENCODER_ERROR_OUTPUT_BUFFER_TOO_SMALL` if the buffer is too small
 - **Encoder input**: packed bytes per `PcmFormat` (interleaved, little-endian, signed, `ceil(bps/8)` bytes per sample, odd depths left-justified), exactly the decoder's `uint8_t*` output. 2-byte samples must be 2-byte aligned. Advance the input by `bytes_consumed`

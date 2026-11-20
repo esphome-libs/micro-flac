@@ -91,12 +91,12 @@ The benchmark runs each chunk size first with CRC disabled, then with CRC enable
                                 CRC Disabled           CRC Enabled
   Test Case              Time (ms) Real-time   Time (ms) Real-time
   --------------------  ---------- ---------  ---------- ---------
-  Full frame                918.44     32.7x      997.20     30.1x
-  1000 byte chunks          922.85     32.5x     1001.53     30.0x
-  500 byte chunks           929.05     32.3x     1008.20     29.8x
-  100 byte chunks           976.01     30.7x     1058.59     28.3x
-  4 byte chunks            2381.82     12.6x     2539.50     11.8x
-  1 byte chunks            6971.44      4.3x     7335.52      4.1x
+  Full frame                888.33     33.8x      967.05     31.0x
+  1000 byte chunks          892.87     33.6x      971.50     30.9x
+  500 byte chunks           899.25     33.4x      978.39     30.7x
+  100 byte chunks           947.54     31.7x     1030.15     29.1x
+  4 byte chunks            2394.07     12.5x     2551.77     11.8x
+  1 byte chunks            7110.94      4.2x     7474.91      4.0x
 ```
 
 ### ESP32-S3 @ 240 MHz (24-bit/48 kHz stereo, 30 seconds, packed 24-bit output)
@@ -109,12 +109,12 @@ The benchmark runs each chunk size first with CRC disabled, then with CRC enable
                                 CRC Disabled           CRC Enabled
   Test Case              Time (ms) Real-time   Time (ms) Real-time
   --------------------  ---------- ---------  ---------- ---------
-  Full frame               1385.12     21.7x     1550.97     19.3x
-  1000 byte chunks         1396.87     21.5x     1561.39     19.2x
-  500 byte chunks          1409.57     21.3x     1575.18     19.0x
-  100 byte chunks          1511.05     19.9x     1684.76     17.8x
-  4 byte chunks            4599.14      6.5x     4939.39      6.1x
-  1 byte chunks           14618.28      2.1x    15413.56      1.9x
+  Full frame               1313.19     22.8x     1479.07     20.3x
+  1000 byte chunks         1325.30     22.6x     1489.87     20.1x
+  500 byte chunks          1338.41     22.4x     1504.00     19.9x
+  100 byte chunks          1442.87     20.8x     1616.57     18.6x
+  4 byte chunks            4620.40      6.5x     4960.62      6.0x
+  1 byte chunks           14919.41      2.0x    15714.71      1.9x
 ```
 
 ### ESP32-S3 @ 240 MHz (24-bit/48 kHz stereo, 30 seconds, 32-bit output)
@@ -127,15 +127,15 @@ The benchmark runs each chunk size first with CRC disabled, then with CRC enable
                                 CRC Disabled           CRC Enabled
   Test Case              Time (ms) Real-time   Time (ms) Real-time
   --------------------  ---------- ---------  ---------- ---------
-  Full frame               1365.12     22.0x     1532.06     19.6x
-  1000 byte chunks         1377.01     21.8x     1542.12     19.5x
-  500 byte chunks          1389.84     21.6x     1555.80     19.3x
-  100 byte chunks          1490.52     20.1x     1664.45     18.0x
-  4 byte chunks            4552.48      6.6x     4892.73      6.1x
-  1 byte chunks           14489.41      2.1x    15284.61      2.0x
+  Full frame               1293.20     23.2x     1460.13     20.5x
+  1000 byte chunks         1305.50     23.0x     1470.59     20.4x
+  500 byte chunks          1318.67     22.8x     1484.61     20.2x
+  100 byte chunks          1422.31     21.1x     1596.29     18.8x
+  4 byte chunks            4573.71      6.6x     4913.94      6.1x
+  1 byte chunks           14790.53      2.0x    15585.75      1.9x
 ```
 
-Streaming in chunks of 500 bytes or larger adds under 2% over full-frame decoding (100-byte chunks: 6-9%). CRC checking adds roughly 9% for 16-bit and 12% for 24-bit audio.
+Streaming in chunks of 500 bytes or larger adds under 2% over full-frame decoding (100-byte chunks: 6-10%). CRC checking adds roughly 9% for 16-bit and 12% for 24-bit audio.
 
 ## Interpreting Results
 
@@ -151,10 +151,10 @@ RTF = decode_time / audio_duration
 
 | Device | Clock | Bit depth | Working buffer | Expected RTF | Real-time |
 |--------|-------|-----------|----------------|--------------|-----------|
-| ESP32 | 240 MHz | 16-bit | PSRAM | 0.107-0.131 | 7-9x |
-| ESP32 | 240 MHz | 16-bit | Internal | 0.079-0.087 | 11-13x |
-| ESP32-S3 | 240 MHz | 16-bit | PSRAM | 0.031-0.035 | 28-33x |
-| ESP32-S3 | 240 MHz | 24-bit | PSRAM | 0.046-0.056 | 18-22x |
+| ESP32 | 240 MHz | 16-bit | PSRAM | 0.105-0.130 | 8-10x |
+| ESP32 | 240 MHz | 16-bit | Internal | 0.078-0.084 | 12-13x |
+| ESP32-S3 | 240 MHz | 16-bit | PSRAM | 0.030-0.034 | 29-34x |
+| ESP32-S3 | 240 MHz | 24-bit | PSRAM | 0.043-0.054 | 19-23x |
 | ESP32-P4 | 360 MHz | 16-bit | PSRAM | 0.037-0.041 | 25-27x |
 | ESP32-P4 | 360 MHz | 24-bit | PSRAM | 0.050-0.058 | 17-20x |
 

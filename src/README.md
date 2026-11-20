@@ -210,6 +210,8 @@ The public `restore_lpc()` function dispatches to a specialized implementation b
    - Side channel samples can be up to 33 bits wide, requiring `int64_t` buffers
    - Always uses 64-bit accumulation (no Xtensa assembly dispatch)
 
+Both assembly files are scheduled against the measured pipeline. On both cores a multiply result stalls one cycle if the next instruction uses it. A load result stalls one cycle at distance 1 on the ESP32-S3 (LX7); on the ESP32 (LX6) it stalls two cycles at distance 1 and one at distance 2. Every load therefore sits at least 3 instructions before its first use and every product at least 2 before its first use. Each sample's first product goes straight into the accumulator, and the next sample's first input is loaded at the end of the current iteration. The loops are stall-free on both cores, except 32-bit order 10: its two temporaries leave four one-cycle load stalls per sample on the ESP32. Without `saltu`, the ESP32's 64-bit carry check is a branch, taken when there is no carry; a taken branch costs 3 cycles. Carries occur in about half of real-audio MACs, so neither branch direction is cheaper.
+
 ### Output
 
 Output packing converts the internal planar 32-bit representation to interleaved PCM in the user's output buffer. The implementation is in `pcm_packing.cpp` with optimized fast paths dispatched by `write_samples()`:
