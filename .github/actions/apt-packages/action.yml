@@ -99,6 +99,10 @@ runs:
             -o Dir::Cache::archives="${debs}" -o APT::Install-Recommends="${RECOMMENDS}" "$@"
         }
 
+        # No hash check: apt matches a cached deb by name and size only, but only someone able to
+        # write the cache entry could plant a deb that passes, and actions/cache extracts with
+        # `tar -P`, so they could write files anywhere without one. That is guarded by limiting
+        # who can write main's cache scope, not here.
         if [ -n "${RESTORED_KEY}" ] && compgen -G "${debs}/*.deb" > /dev/null; then
           if apt_get 180 install --no-download "${package_list[@]}"; then
             echo "Installed ${PACKAGES} from cache entry ${RESTORED_KEY}"
