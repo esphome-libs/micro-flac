@@ -41,23 +41,31 @@
 
 #ifndef FLAC_MALLOC
 #ifdef ESP_PLATFORM
+// Internal memory is requested as DRAM first. On the ESP32, MALLOC_CAP_INTERNAL |
+// MALLOC_CAP_32BIT also matches IRAM, where data loads are about 3.7x slower than from DRAM
+// (the 32-bit order-8 LPC loop: 103 cycles per sample from IRAM, 28 from DRAM, 36 from 40 MHz
+// PSRAM). MALLOC_CAP_8BIT excludes IRAM, so IRAM is only a last resort.
+#define FLAC_MALLOC_CAPS_DRAM (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#define FLAC_MALLOC_CAPS_ANY_INTERNAL (MALLOC_CAP_INTERNAL | MALLOC_CAP_32BIT)
+#define FLAC_MALLOC_CAPS_PSRAM (MALLOC_CAP_SPIRAM | MALLOC_CAP_32BIT)
 #if defined(MICRO_FLAC_MEMORY_PREFER_PSRAM)
-#define FLAC_MALLOC(sz)                                                  \
-    heap_caps_malloc_prefer(sz, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_32BIT, \
-                            MALLOC_CAP_INTERNAL | MALLOC_CAP_32BIT)
+#define FLAC_MALLOC(sz)                                                           \
+    heap_caps_malloc_prefer(sz, 3, FLAC_MALLOC_CAPS_PSRAM, FLAC_MALLOC_CAPS_DRAM, \
+                            FLAC_MALLOC_CAPS_ANY_INTERNAL)
 #elif defined(MICRO_FLAC_MEMORY_PREFER_INTERNAL)
-#define FLAC_MALLOC(sz)                                                    \
-    heap_caps_malloc_prefer(sz, 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_32BIT, \
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_32BIT)
+#define FLAC_MALLOC(sz)                                                           \
+    heap_caps_malloc_prefer(sz, 3, FLAC_MALLOC_CAPS_DRAM, FLAC_MALLOC_CAPS_PSRAM, \
+                            FLAC_MALLOC_CAPS_ANY_INTERNAL)
 #elif defined(MICRO_FLAC_MEMORY_PSRAM_ONLY)
-#define FLAC_MALLOC(sz) heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_32BIT)
+#define FLAC_MALLOC(sz) heap_caps_malloc(sz, FLAC_MALLOC_CAPS_PSRAM)
 #elif defined(MICRO_FLAC_MEMORY_INTERNAL_ONLY)
-#define FLAC_MALLOC(sz) heap_caps_malloc(sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_32BIT)
+#define FLAC_MALLOC(sz) \
+    heap_caps_malloc_prefer(sz, 2, FLAC_MALLOC_CAPS_DRAM, FLAC_MALLOC_CAPS_ANY_INTERNAL)
 #else
 // Default: prefer PSRAM, fall back to internal
-#define FLAC_MALLOC(sz)                                                  \
-    heap_caps_malloc_prefer(sz, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_32BIT, \
-                            MALLOC_CAP_INTERNAL | MALLOC_CAP_32BIT)
+#define FLAC_MALLOC(sz)                                                           \
+    heap_caps_malloc_prefer(sz, 3, FLAC_MALLOC_CAPS_PSRAM, FLAC_MALLOC_CAPS_DRAM, \
+                            FLAC_MALLOC_CAPS_ANY_INTERNAL)
 #endif
 #else
 #define FLAC_MALLOC(sz) malloc(sz)
